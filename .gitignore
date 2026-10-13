@@ -1,0 +1,4 @@
+# Ignore temporary files
+*.tmp
+*.log
+.system_generated/
