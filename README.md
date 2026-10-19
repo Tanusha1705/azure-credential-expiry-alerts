@@ -3,6 +3,9 @@
 > **Azure Automation Runbook (PowerShell 7.2 / 5.1)**  
 > Monitors and alerts on upcoming and already-expired credentials and certificates across Microsoft Entra ID and Azure infrastructure workloads.
 
+> 🛡️ **Azure Storage Account Security Audits (AWS S3 Replication):**  
+> Looking to audit Azure Storage Account security (encryption, BPA, network ACLs)? See the [`storage_audit/`](./storage_audit/README.md) directory for 1-click Azure Cloud Shell copy-paste scripts.
+
 ---
 
 ## 📌 Overview
