@@ -22,6 +22,9 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
+    [string]$ManagementGroupId = "ac-1.1",
+
+    [Parameter(Mandatory = $false)]
     [string]$OutputPath = $PSScriptRoot,
 
     [Parameter(Mandatory = $false)]
@@ -35,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 # ==============================================================================
 # TARGET MANAGEMENT GROUP CONFIGURATION
 # ==============================================================================
-$TargetManagementGroupId = "ac-1.1"
+$TargetManagementGroupId = $ManagementGroupId
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host " Azure Storage Account Security Audit" -ForegroundColor Cyan
