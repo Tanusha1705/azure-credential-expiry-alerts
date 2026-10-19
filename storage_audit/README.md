@@ -42,15 +42,29 @@ subscriptionname,subscriptionid,allowblobpublicaccess
 
 ---
 
-## 2. Azure Portal Cloud Shell (PowerShell) — Quick One-Liners
+## 2. Scoping to a Specific Management Group (Azure Cloud Shell PowerShell)
 
-If you are using the **PowerShell terminal inside Azure Portal (Cloud Shell)**, you do **not** need to install any modules or authenticate. 
+To run **only for a specific Management Group** instead of the entire tenant, simply pass the `-ManagementGroup` parameter to `Search-AzGraph`.
 
-Copy and paste these commands directly into your Cloud Shell prompt:
+> **💡 How to find your Management Group ID:**
+> In Cloud Shell, run:
+> ```powershell
+> Get-AzManagementGroup | Select-Object Name, DisplayName
+> ```
+> *(Note: Use the `Name` value, which is the Management Group ID/Code, e.g., `mg-production` or `mycompany-corp`)*.
 
-### Command 1: Generate `StorageAccount-consolidated.csv`
+---
+
+### Quick One-Liners (Scoped to Management Group)
+
+Set your Management Group ID once:
 ```powershell
-Search-AzGraph -Query @"
+$mgId = "YOUR_MANAGEMENT_GROUP_ID"   # <-- Replace with your actual Management Group ID
+```
+
+#### Command 1: Generate `StorageAccount-consolidated.csv`
+```powershell
+Search-AzGraph -ManagementGroup $mgId -Query @"
 resources
 | where type =~ 'microsoft.storage/storageaccounts'
 | join kind=leftouter (
@@ -69,9 +83,9 @@ resources
 "@ -First 5000 | Export-Csv -Path "StorageAccount-consolidated.csv" -NoTypeInformation -Encoding utf8
 ```
 
-### Command 2: Generate `StorageAccount-bpa.csv` (Subscription Summary)
+#### Command 2: Generate `StorageAccount-bpa.csv` (Subscription Summary)
 ```powershell
-Search-AzGraph -Query @"
+Search-AzGraph -ManagementGroup $mgId -Query @"
 resources
 | where type =~ 'microsoft.storage/storageaccounts'
 | extend isPublicAllowed = coalesce(properties.allowBlobPublicAccess, false)
@@ -92,9 +106,9 @@ resources
 "@ -First 5000 | Export-Csv -Path "StorageAccount-bpa.csv" -NoTypeInformation -Encoding utf8
 ```
 
-### Command 3 (Optional): Generate `StorageAccount-bpa-detailed.csv` (Per Storage Account)
+#### Command 3 (Optional): Generate `StorageAccount-bpa-detailed.csv` (Per Storage Account)
 ```powershell
-Search-AzGraph -Query @"
+Search-AzGraph -ManagementGroup $mgId -Query @"
 resources
 | where type =~ 'microsoft.storage/storageaccounts'
 | join kind=leftouter (
@@ -112,56 +126,59 @@ resources
 ```
 
 ### How to Download the Files from Azure Cloud Shell to Your PC:
-1. In the Azure Cloud Shell top toolbar, click the **Manage files** icon (the double up/down arrow icon `↕`).
+1. In the Azure Cloud Shell top toolbar, click the **Manage files** icon (`↕`).
 2. Click **Download**.
 3. Type the filename:
    - `StorageAccount-consolidated.csv`
    - `StorageAccount-bpa.csv`
-4. Click **Download** to save to your local machine.
+4. Click **Download** to save directly to your local PC.
 
 ---
 
 ## 3. Azure Portal &rarr; Resource Graph Explorer (KQL Queries)
 
-You can also run these directly in the Azure Portal interface:
-1. Search for **Resource Graph Explorer** in the Azure Portal top search bar.
-2. Paste either query into the editor.
-3. Click **Run Query**.
-4. Click **Download as CSV** to get your spreadsheet immediately.
+If using the Azure Portal UI directly:
+1. Navigate to **Resource Graph Explorer**.
+2. **Method A (GUI Scope Picker):** Click the **Scope** dropdown at the top-left (next to Directory), choose **Management Groups**, and select your Management Group. Then run standard queries.
+3. **Method B (Hardcoded KQL Filter):** Use the queries below, which filter directly by Management Group inside the query itself without needing to touch the Scope picker!
 
-### KQL Query 1: Consolidated Storage Account Report
+### KQL Query 1: Consolidated Report (Scoped by Management Group in KQL)
 ```kql
-resources
-| where type =~ 'microsoft.storage/storageaccounts'
-| join kind=leftouter (
-    resourcecontainers
-    | where type =~ 'microsoft.resources/subscriptions'
-    | project subscriptionId, subscriptionName = name
+resourcecontainers
+| where type =~ 'microsoft.resources/subscriptions'
+| mv-expand mg = properties.managementGroupAncestorsChain
+| where mg.name =~ 'YOUR_MANAGEMENT_GROUP_ID' or mg.displayName =~ 'YOUR_MANAGEMENT_GROUP_NAME'
+| project subscriptionId, subscriptionName = name
+| join kind=inner (
+    resources
+    | where type =~ 'microsoft.storage/storageaccounts'
 ) on subscriptionId
 | project
     storageaccountname              = name,
     encryptionkeysource             = tostring(coalesce(properties.encryption.keySource, 'Microsoft.Storage')),
     infrastructureencryptionenabled = tostring(coalesce(properties.encryption.requireInfrastructureEncryption, false)),
     networkacldefaultaction         = tostring(coalesce(properties.networkAcls.defaultAction, 'Allow')),
-    subscriptionname                = coalesce(subscriptionName, subscriptionId),
+    subscriptionname                = subscriptionName,
     subscriptionid                  = subscriptionId
 | order by subscriptionname asc, storageaccountname asc
 ```
 
-### KQL Query 2: Block Public Access (Subscription-Level Summary)
+### KQL Query 2: Block Public Access Summary (Scoped by Management Group in KQL)
 ```kql
-resources
-| where type =~ 'microsoft.storage/storageaccounts'
-| extend isPublicAllowed = coalesce(properties.allowBlobPublicAccess, false)
+resourcecontainers
+| where type =~ 'microsoft.resources/subscriptions'
+| mv-expand mg = properties.managementGroupAncestorsChain
+| where mg.name =~ 'YOUR_MANAGEMENT_GROUP_ID' or mg.displayName =~ 'YOUR_MANAGEMENT_GROUP_NAME'
+| project subscriptionId, subscriptionName = name
+| join kind=inner (
+    resources
+    | where type =~ 'microsoft.storage/storageaccounts'
+    | extend isPublicAllowed = coalesce(properties.allowBlobPublicAccess, false)
+) on subscriptionId
 | summarize
     TotalAccounts = count(),
     PublicAllowedCount = countif(isPublicAllowed == true)
-    by subscriptionId
-| join kind=leftouter (
-    resourcecontainers
-    | where type =~ 'microsoft.resources/subscriptions'
-    | project subscriptionId, subscriptionName = name
-) on subscriptionId
+    by subscriptionId, subscriptionName
 | project
     subscriptionname      = subscriptionName,
     subscriptionid        = subscriptionId,
@@ -169,51 +186,30 @@ resources
 | order by subscriptionname asc
 ```
 
-### KQL Query 2 (Detailed): Block Public Access Per Storage Account
-```kql
-resources
-| where type =~ 'microsoft.storage/storageaccounts'
-| join kind=leftouter (
-    resourcecontainers
-    | where type =~ 'microsoft.resources/subscriptions'
-    | project subscriptionId, subscriptionName = name
-) on subscriptionId
-| project
-    storageaccountname    = name,
-    subscriptionname      = coalesce(subscriptionName, subscriptionId),
-    subscriptionid        = subscriptionId,
-    allowblobpublicaccess = tostring(coalesce(properties.allowBlobPublicAccess, false))
-| order by subscriptionname asc, storageaccountname asc
+---
+
+## 4. Full Standalone Automation Script (`Export-StorageAccountSecurityReports.ps1`)
+
+The script has a built-in `-ManagementGroupId` parameter:
+
+```powershell
+# Audit only a specific Management Group:
+.\Export-StorageAccountSecurityReports.ps1 -ManagementGroupId "YOUR_MANAGEMENT_GROUP_ID"
+
+# Audit specific Management Group and export both CSV and formatted Excel (.xlsx):
+.\Export-StorageAccountSecurityReports.ps1 -ManagementGroupId "YOUR_MANAGEMENT_GROUP_ID" -OutputPath "C:\Reports" -Format Both
 ```
 
 ---
 
-## 4. Azure CLI (`az graph query`)
+## 5. Azure CLI (`az graph query`)
 
-If running from Azure CLI:
+If using Azure CLI with the `-m` (management group) flag:
 
 ```bash
+# Set your MG ID
+MG_ID="YOUR_MANAGEMENT_GROUP_ID"
+
 # 1. Consolidated Report
-az graph query -q "resources | where type =~ 'microsoft.storage/storageaccounts' | join kind=leftouter (resourcecontainers | where type =~ 'microsoft.resources/subscriptions' | project subscriptionId, subscriptionName = name) on subscriptionId | project storageaccountname = name, encryptionkeysource = tostring(coalesce(properties.encryption.keySource, 'Microsoft.Storage')), infrastructureencryptionenabled = tostring(coalesce(properties.encryption.requireInfrastructureEncryption, false)), networkacldefaultaction = tostring(coalesce(properties.networkAcls.defaultAction, 'Allow')), subscriptionname = coalesce(subscriptionName, subscriptionId), subscriptionid = subscriptionId | order by subscriptionname asc, storageaccountname asc" --output table
-
-# 2. BPA Subscription Report
-az graph query -q "resources | where type =~ 'microsoft.storage/storageaccounts' | extend isPublicAllowed = coalesce(properties.allowBlobPublicAccess, false) | summarize TotalAccounts = count(), PublicAllowedCount = countif(isPublicAllowed == true) by subscriptionId | join kind=leftouter (resourcecontainers | where type =~ 'microsoft.resources/subscriptions' | project subscriptionId, subscriptionName = name) on subscriptionId | project subscriptionname = subscriptionName, subscriptionid = subscriptionId, allowblobpublicaccess = iff(PublicAllowedCount > 0, strcat('true (', PublicAllowedCount, '/', TotalAccounts, ' accounts allow public access)'), 'false (Blocked on all accounts)') | order by subscriptionname asc" --output table
-```
-
----
-
-## 5. Full Standalone Automation Script (`Export-StorageAccountSecurityReports.ps1`)
-
-If you want a full script that supports:
-- Automatic fallback from Resource Graph to `Get-AzStorageAccount`
-- Direct Excel `.xlsx` formatting with styled headers and autofit columns
-- Filtering by specific subscription IDs
-
-Run the script located in this folder:
-```powershell
-# Run with default CSV export
-.\Export-StorageAccountSecurityReports.ps1
-
-# Run with both CSV and native Excel (.xlsx) formatting
-.\Export-StorageAccountSecurityReports.ps1 -OutputPath "C:\Reports" -Format Both
+az graph query -m "$MG_ID" -q "resources | where type =~ 'microsoft.storage/storageaccounts' | join kind=leftouter (resourcecontainers | where type =~ 'microsoft.resources/subscriptions' | project subscriptionId, subscriptionName = name) on subscriptionId | project storageaccountname = name, encryptionkeysource = tostring(coalesce(properties.encryption.keySource, 'Microsoft.Storage')), infrastructureencryptionenabled = tostring(coalesce(properties.encryption.requireInfrastructureEncryption, false)), networkacldefaultaction = tostring(coalesce(properties.networkAcls.defaultAction, 'Allow')), subscriptionname = coalesce(subscriptionName, subscriptionId), subscriptionid = subscriptionId | order by subscriptionname asc, storageaccountname asc" --output table
 ```

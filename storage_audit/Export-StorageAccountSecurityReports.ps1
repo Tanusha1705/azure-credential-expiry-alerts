@@ -48,6 +48,9 @@ param (
     [string]$Format = 'Csv',
 
     [Parameter(Mandatory = $false)]
+    [string]$ManagementGroupId,
+
+    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds
 )
 
@@ -123,7 +126,11 @@ resources
             Query = $kqlQuery
             First = 5000
         }
-        if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+        if ($ManagementGroupId) {
+            $queryArgs['ManagementGroup'] = $ManagementGroupId
+            Write-Host "[INFO] Scoping query strictly to Management Group: '$ManagementGroupId'" -ForegroundColor Yellow
+        }
+        elseif ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
             $queryArgs['Subscription'] = $SubscriptionIds
         }
 
@@ -179,7 +186,17 @@ resources
 
 if (-not $hasArg) {
     Write-Host "`n[STEP 1/3] Extracting Storage Account data via Az Cmdlets..." -ForegroundColor Cyan
-    $subs = if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+    $subs = if ($ManagementGroupId) {
+        Write-Host "  -> Discovering subscriptions under Management Group '$ManagementGroupId'..." -ForegroundColor Gray
+        $mgSubs = Get-AzManagementGroupSubscription -GroupName $ManagementGroupId -ErrorAction SilentlyContinue
+        if ($mgSubs) {
+            Get-AzSubscription | Where-Object { $mgSubs.Id -contains $_.Id -or $mgSubs.SubscriptionId -contains $_.Id -or $mgSubs.Name -contains $_.Id }
+        } else {
+            Write-Host "  [WARN] Could not retrieve subscriptions via Get-AzManagementGroupSubscription. Querying all." -ForegroundColor Yellow
+            Get-AzSubscription
+        }
+    }
+    elseif ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
         Get-AzSubscription | Where-Object { $SubscriptionIds -contains $_.Id }
     } else {
         Get-AzSubscription
