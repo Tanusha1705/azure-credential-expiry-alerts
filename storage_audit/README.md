@@ -15,13 +15,8 @@ Open **Azure Cloud Shell** (`>_` icon in top bar of Azure Portal), ensure **Powe
 # 1-CLICK AZURE CLOUD SHELL AUDIT SCRIPT (STRICT MANAGEMENT GROUP SCOPE)
 # ==============================================================================
 
-# 1. Prompt for Management Group ID or Name
-$mgInput = Read-Host "Enter your Management Group ID or Display Name (or press Enter to list)"
-if ([string]::IsNullOrWhiteSpace($mgInput)) {
-    Write-Host "`nListing your accessible Management Groups..." -ForegroundColor Cyan
-    Get-AzManagementGroup | Select-Object Name, DisplayName | Format-Table -AutoSize
-    $mgInput = Read-Host "Enter the Management Group Name (ID) from the table above"
-}
+# 1. Target Management Group (Pre-configured for 'ac-1.1')
+$mgInput = "ac-1.1"
 
 # 2. Resolve Management Group recursively
 Write-Host "`n[1/4] Resolving Management Group '$mgInput'..." -ForegroundColor Cyan
