@@ -6,6 +6,9 @@
 > 🛡️ **Azure Storage Account Security Audits (AWS S3 Replication):**  
 > Looking to audit Azure Storage Account security (encryption, BPA, network ACLs)? See the [`storage_audit/`](./storage_audit/README.md) directory for 1-click Azure Cloud Shell copy-paste scripts.
 
+> 🌐 **Azure Virtual Network (VNet) Subnet Audits & Inventory:**  
+> Looking to extract detailed VNet Subnet configuration, capacity, and IPv6 data across Management Groups? See the [`network_audit/`](./network_audit/README.md) directory for 1-click Azure Cloud Shell copy-paste scripts.
+
 ---
 
 ## 📌 Overview
