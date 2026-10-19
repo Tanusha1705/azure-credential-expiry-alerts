@@ -92,7 +92,67 @@ if (($Format -in @('Excel', 'Both')) -and -not $hasImportExcel) {
 }
 
 # -------------------------------------------------------------------------
-# 2. DATA EXTRACTION
+# 2. RESOLVE SCOPE & SUBSCRIPTIONS
+# -------------------------------------------------------------------------
+if ($ManagementGroupId) {
+    Write-Host "`n[SCOPE RESOLUTION] Resolving Management Group: '$ManagementGroupId'..." -ForegroundColor Cyan
+    
+    # 1. Look up Management Group by ID or DisplayName
+    $mg = Get-AzManagementGroup -GroupId $ManagementGroupId -Expand -Recurse -ErrorAction SilentlyContinue
+    if (-not $mg) {
+        $allMgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
+        $matched = $allMgs | Where-Object { $_.Name -eq $ManagementGroupId -or $_.DisplayName -eq $ManagementGroupId } | Select-Object -First 1
+        if ($matched) {
+            $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not $mg) {
+        Throw "Management Group '$ManagementGroupId' was not found in this tenant! Stopped to avoid scanning the entire tenant."
+    }
+
+    Write-Host "[+] Matched Management Group: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
+
+    # 2. Recursively gather all subscription IDs under this Management Group
+    $discoveredSubIds = [System.Collections.Generic.List[string]]::new()
+    function Resolve-MgSubsRecursive($node) {
+        if ($node.Children) {
+            foreach ($c in $node.Children) {
+                if ($c.Type -match 'subscriptions' -and $c.Name) {
+                    $discoveredSubIds.Add($c.Name)
+                }
+                if ($c.Children) {
+                    Resolve-MgSubsRecursive $c
+                }
+            }
+        }
+    }
+    Resolve-MgSubsRecursive $mg
+
+    if ($discoveredSubIds.Count -eq 0) {
+        $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
+        if ($mgSubs) {
+            foreach ($s in $mgSubs) {
+                $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
+                if ($sid) { $discoveredSubIds.Add($sid) }
+            }
+        }
+    }
+
+    $uniqueSubIds = @($discoveredSubIds | Select-Object -Unique)
+    if ($uniqueSubIds.Count -eq 0) {
+        Throw "No subscriptions found under Management Group '$($mg.DisplayName)'! Stopped to avoid scanning unintended subscriptions."
+    }
+
+    Write-Host "[+] Found $($uniqueSubIds.Count) subscription(s) strictly under '$($mg.DisplayName)':" -ForegroundColor Green
+    $uniqueSubIds | ForEach-Object { Write-Host "    -> Subscription ID: $_" -ForegroundColor DarkGray }
+
+    # Lock down target subscriptions strictly to this Management Group
+    $SubscriptionIds = $uniqueSubIds
+}
+
+# -------------------------------------------------------------------------
+# 3. DATA EXTRACTION
 # -------------------------------------------------------------------------
 $consolidatedList = [System.Collections.Generic.List[PSCustomObject]]::new()
 $bpaList          = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -103,10 +163,19 @@ $hasArg = [bool](Get-Module -ListAvailable -Name Az.ResourceGraph)
 if ($hasArg) {
     Write-Host "`n[STEP 1/3] Extracting Storage Account data via Azure Resource Graph (High-Speed)..." -ForegroundColor Cyan
     try {
-        # KQL Query to retrieve all storage accounts across all tenant subscriptions
+        # Construct strict subscription filter inside KQL if subscriptions are defined
+        $kqlSubFilter = ""
+        if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+            $formattedIds = ($SubscriptionIds | ForEach-Object { "'$_'" }) -join ", "
+            $kqlSubFilter = "| where subscriptionId in ($formattedIds)"
+            Write-Host "[INFO] Hard-filtering KQL query strictly to $($SubscriptionIds.Count) target subscription(s)." -ForegroundColor Yellow
+        }
+
+        # KQL Query to retrieve storage accounts strictly within target subscriptions
         $kqlQuery = @"
 resources
 | where type =~ 'microsoft.storage/storageaccounts'
+$kqlSubFilter
 | join kind=leftouter (
     resourcecontainers
     | where type =~ 'microsoft.resources/subscriptions'
@@ -126,16 +195,12 @@ resources
             Query = $kqlQuery
             First = 5000
         }
-        if ($ManagementGroupId) {
-            $queryArgs['ManagementGroup'] = $ManagementGroupId
-            Write-Host "[INFO] Scoping query strictly to Management Group: '$ManagementGroupId'" -ForegroundColor Yellow
-        }
-        elseif ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+        if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
             $queryArgs['Subscription'] = $SubscriptionIds
         }
 
         $rawResults = Search-AzGraph @queryArgs
-        Write-Host "[+] Retrieved $($rawResults.Count) Storage Account(s) across subscriptions." -ForegroundColor Green
+        Write-Host "[+] Retrieved $($rawResults.Count) Storage Account(s) in target scope." -ForegroundColor Green
 
         foreach ($row in $rawResults) {
             # Report 1: Consolidated Object
@@ -186,17 +251,7 @@ resources
 
 if (-not $hasArg) {
     Write-Host "`n[STEP 1/3] Extracting Storage Account data via Az Cmdlets..." -ForegroundColor Cyan
-    $subs = if ($ManagementGroupId) {
-        Write-Host "  -> Discovering subscriptions under Management Group '$ManagementGroupId'..." -ForegroundColor Gray
-        $mgSubs = Get-AzManagementGroupSubscription -GroupName $ManagementGroupId -ErrorAction SilentlyContinue
-        if ($mgSubs) {
-            Get-AzSubscription | Where-Object { $mgSubs.Id -contains $_.Id -or $mgSubs.SubscriptionId -contains $_.Id -or $mgSubs.Name -contains $_.Id }
-        } else {
-            Write-Host "  [WARN] Could not retrieve subscriptions via Get-AzManagementGroupSubscription. Querying all." -ForegroundColor Yellow
-            Get-AzSubscription
-        }
-    }
-    elseif ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
+    $subs = if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
         Get-AzSubscription | Where-Object { $SubscriptionIds -contains $_.Id }
     } else {
         Get-AzSubscription
