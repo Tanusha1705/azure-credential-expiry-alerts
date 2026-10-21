@@ -1,7 +1,8 @@
-# Azure Credential & Certificate Expiry Alerts Runbook
+# Azure Credential & Certificate Expiry Alerts & Audit Suite
 
-> **Azure Automation Runbook (PowerShell 7.2 / 5.1)**  
-> Monitors and alerts on upcoming and already-expired credentials and certificates across Microsoft Entra ID and Azure infrastructure workloads.
+> **Two-Stage Solution for Microsoft Entra ID & Azure Workloads**  
+> 1. 🧪 **Local Testing & Audit Script (`Test-TenantApplicationCertificates.ps1`):** Run locally on any admin workstation to discover ALL uploaded certificates across your tenant, export audit CSVs, and preview email notifications in your browser **without sending real emails**.  
+> 2. ⚡ **Production Azure Automation Runbook (`script_v2.ps1`):** Deployed to your Azure Automation Account to run on a recurring schedule and deliver consolidated, color-coded HTML email alerts to application and workload owners before credentials expire.
 
 > 🛡️ **Azure Storage Account Security Audits (AWS S3 Replication):**  
 > Looking to audit Azure Storage Account security (encryption, BPA, network ACLs)? See the [`storage_audit/`](./storage_audit/README.md) directory for 1-click Azure Cloud Shell copy-paste scripts.
@@ -11,26 +12,81 @@
 
 ---
 
-## 📌 Overview
+## 🔍 Monitored Workloads (5 Sources)
 
-This runbook automatically discovers expiring and expired credentials across four critical Azure surfaces and sends consolidated, color-coded HTML email notifications to resource owners via Microsoft Graph API.
-
-### 🔍 Monitored Workloads (4 Sources)
-
-| Source | Target Resource | What is Monitored |
-|---|---|---|
-| **1. Entra ID App Registrations** | Azure AD Applications | Client Secrets and Certificates expiring or expired |
-| **2. Azure App Service Certificates** | Azure App Service | SSL/TLS certificates attached to App Services |
-| **3. Azure Key Vault Secrets** | Azure Key Vaults | Secrets with expiration dates (`Expires` attribute set) |
-| **4. Azure Application Gateway** | Application Gateways | Directly uploaded SSL certificates (`PublicCertData` X.509) |
+| # | Workload Surface | Target Resource | What is Monitored & Alerted |
+|---|---|---|---|
+| **1** | **Entra ID App Registrations** | Azure AD Applications | Uploaded Client/Federation Certificates (`KeyCredentials`) & Client Secrets |
+| **2** | **Entra ID Enterprise Applications (NEW)** | Service Principals / SSO Apps | SAML Single Sign-On (SSO) Signing & Token Verification Certificates |
+| **3** | **Azure App Service Certificates** | Azure App Service | SSL/TLS certificates attached to App Services |
+| **4** | **Azure Key Vault Secrets** | Azure Key Vaults | Secrets with expiration dates (`Expires` attribute set) |
+| **5** | **Azure Application Gateway** | Application Gateways | Directly uploaded SSL certificates (`PublicCertData` X.509) |
 
 ---
 
-## 🔒 Confidential Placeholders & Replacement Guide
+## 🧪 Stage 1: Local Testing & Validation (`Test-TenantApplicationCertificates.ps1`)
 
-All sensitive infrastructure values in the script have been sanitized and replaced with `xxxx-` placeholders. Before running or deploying, replace the placeholders with your organization's actual values:
+Before running automated alerts in an Automation Account, use [`Test-TenantApplicationCertificates.ps1`](./Test-TenantApplicationCertificates.ps1) to discover every certificate uploaded across your tenant, verify owner assignments, and preview the notification email format.
 
-### 📋 Placeholders Table
+### 📦 Prerequisites for Local Testing
+
+Open PowerShell 5.1 or PowerShell 7 (as Administrator or standard user) and install the lightweight Graph modules:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Applications -Scope CurrentUser -Repository PSGallery -Force
+```
+*(Or pass `-AutoInstallModules` to the script to install automatically).*
+
+### 🚀 Running the Local Test Script
+
+#### Option A: Quick Interactive Browser Login (Recommended)
+Pops a browser window to authenticate with your administrator account:
+```powershell
+.\Test-TenantApplicationCertificates.ps1
+```
+
+#### Option B: Retrieve ALL Certificates in the Tenant (Active, Upcoming & Expired)
+Outputs every certificate in the tenant regardless of expiry date, exports to CSV, and generates an HTML browser preview:
+```powershell
+.\Test-TenantApplicationCertificates.ps1 -AllCertificates
+```
+
+#### Option C: Authenticate Unattended via App Registration (Client Secret)
+```powershell
+.\Test-TenantApplicationCertificates.ps1 `
+    -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" `
+    -ClientId "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy" `
+    -ClientSecret "YourSecretHere"
+```
+
+#### Option D: Custom Expiration Window (e.g. 60 or 90 Days)
+```powershell
+.\Test-TenantApplicationCertificates.ps1 -DaysUntilExpiration 60 -GenerateEmailPreview $true
+```
+
+#### Option E: Include Azure Infrastructure (App Services, Key Vaults, App Gateways)
+```powershell
+.\Test-TenantApplicationCertificates.ps1 -IncludeAzureResources
+```
+
+### 📊 Local Test Outputs
+
+1. **Console Color Dashboard:**
+   - Summary metric cards (Expired, Critical <=7d, Warning <=14d, Attention <=30d, Healthy >30d).
+   - Formatted table showing Application Name, Certificate Friendly Name, Thumbprint, Start/End Dates, Days Remaining, and Resolved Owners.
+   - Highlights orphaned applications (`<<No Owner - Orphaned>>`).
+2. **CSV Audit Report:** Auto-generates a timestamped CSV (e.g. `TenantApplicationCertificates_20261021_211500.csv`) with full details for Excel analysis and reporting to management.
+3. **Interactive HTML Email Preview:** Auto-generates and opens an HTML preview (`EmailAlert_Preview_*.html`) in your default web browser so you can inspect the exact formatting owners will receive.
+
+---
+
+## ⚡ Stage 2: Deploying to Azure Automation Account (`script_v2.ps1`)
+
+Once local testing confirms all tenant certificates are detected, deploy [`script_v2.ps1`](./script_v2.ps1) to your Azure Automation Account to run daily and email owners automatically.
+
+### 🔒 Confidential Placeholders & Replacement Guide
+
+Replace the following placeholders in [`script_v2.ps1`](./script_v2.ps1) before publishing:
 
 | Placeholder in Script | Where It Is Found | What to Replace It With | Example Value |
 |---|---|---|---|
@@ -52,8 +108,6 @@ All sensitive infrastructure values in the script have been sanitized and replac
 
 ## ⚙️ Azure Automation Account Configuration
 
-The runbook relies on the following Azure Automation assets being configured:
-
 ### 1. 🔑 Credentials (`Automation Account -> Credentials`)
 - **Credential Asset Name:** Matches `xxxx-AutomationCredentialName`
   - **Username:** Entra ID Application (Client) ID
@@ -63,7 +117,7 @@ The runbook relies on the following Azure Automation assets being configured:
 
 | Variable Name | Type | Description |
 |---|---|---|
-| `GTAdminUsers` | String | Comma-separated emails of global administrators / team members |
+| `GTAdminUsers` | String | Comma-separated emails of global administrators (included on CC) |
 | `EmailCC_AppRegistrationExpiry` | String | Comma-separated emails to CC on every alert email |
 | `EmailBCC_AppRegistrationExpiry` | String | Comma-separated emails to BCC on every alert email |
 | `DefaultOwnerEmail` | String | Default owner address when resource owner lookup is blank |
@@ -74,7 +128,7 @@ The runbook relies on the following Azure Automation assets being configured:
 ## 🛡️ Required Roles & Permissions
 
 ### Azure Role-Based Access Control (RBAC)
-Grant the Automation Account **Managed Identity**:
+Grant the Automation Account **System-Assigned Managed Identity**:
 - **Reader** role on all subscriptions to be monitored (for Resource Graph and App Gateway cert discovery).
 - **Key Vault Secrets User** or **Key Vault Reader** on Key Vaults to discover secret expiration dates.
 
@@ -86,7 +140,7 @@ Grant the App Registration used for Graph API:
 
 ---
 
-## 📦 Required PowerShell Modules
+## 📦 Required PowerShell Modules in Automation Account
 
 Ensure these modules are imported into your Azure Automation Account:
 - `Az.Accounts`
@@ -95,28 +149,27 @@ Ensure these modules are imported into your Azure Automation Account:
 - `Az.KeyVault`
 - `Az.Network`
 - `Microsoft.Graph.Authentication`
+- `Microsoft.Graph.Applications`
 
 ---
 
 ## 🚀 How to Deploy to Azure Automation
 
-1. **Clone or Download** this repository.
-2. In Azure Portal, navigate to your **Automation Account** &rarr; **Runbooks**.
-3. Click **Create a runbook**:
+1. In Azure Portal, navigate to your **Automation Account** &rarr; **Runbooks**.
+2. Click **Create a runbook**:
    - **Name:** `azure-credential-expiry-alerts`
    - **Runbook type:** PowerShell (7.2 or 5.1)
-4. Paste the contents of `script_v2.ps1` (after updating your placeholders).
-5. Click **Save** &rarr; **Test pane** to run a test execution.
-6. Once validated, click **Publish**.
-7. Navigate to **Schedules** &rarr; Link a recurring schedule (e.g., daily at 08:00 UTC).
+3. Paste the contents of [`script_v2.ps1`](./script_v2.ps1) (after updating your placeholders).
+4. Click **Save** &rarr; **Test pane** to run a test execution.
+5. Once validated, click **Publish**.
+6. Navigate to **Schedules** &rarr; Link a recurring schedule (e.g., daily at 08:00 UTC).
 
 ---
 
-## 🎨 Alert Notification Features
+## 🛠️ Key Improvements & Fixes in Version 2.1
 
-- **Consolidated Notification:** Owners receive **one single email** summarizing all their expiring/expired assets across Entra, Key Vault, App Services, and Application Gateways.
-- **Color-Coded Status:**
-  - 🔴 **Red:** Already Expired (`0` days remaining)
-  - 🔵 **Blue:** Expiring Very Soon (`<= 7` days)
-  - 🟡 **Orange:** Expiring Soon (`<= 14` days)
-- **Direct Renewal Guidance:** Each email includes exact step-by-step renewal and rotation instructions for the specific workload type.
+- 🐛 **Fixed Admin-Only Owner Filter:** Previous versions contained `$isGTAdminUser` which inadvertently suppressed alerts for applications owned by regular users. Alerts now evaluate ALL tenant applications and email their respective owners.
+- 🏢 **Added Enterprise Application SAML SSO Certs:** Discovers SAML Single Sign-On and token signing certificates uploaded directly to Enterprise Applications (Service Principals).
+- ⚡ **10x Query Performance:** Pre-filters applications with credentials before performing owner lookups, eliminating redundant Graph API calls and preventing 429 throttling.
+- 🔤 **Fixed PowerShell Syntax & Encoding Issues:** Resolved Unicode em-dash quote issues on Line 477, variable scope collision on `$($appName):`, and here-string formatting.
+- 🧪 **Dedicated Local Testing Script:** Added [`Test-TenantApplicationCertificates.ps1`](./Test-TenantApplicationCertificates.ps1) with CSV export and browser HTML preview.

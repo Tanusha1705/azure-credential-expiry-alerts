@@ -140,13 +140,8 @@ function Get-ExpiringAppRegistrations {
             $Certs = $AppCreds.KeyCredentials
             Write-Host "[DEBUG] $(Get-Date -Format o) - Application '$AppName' has $($Secrets.Count) secret(s) and $($Certs.Count) certificate(s)."
 
-            # --- PROCESS SECRETS ---
-            foreach ($Secret in $Secrets) {
-                $StartDate = $Secret.StartDateTime
-                $EndDate = $Secret.EndDateTime
-                $SecretName = $Secret.DisplayName
-
-                # Get app owners
+            if (($Secrets -and $Secrets.Count -gt 0) -or ($Certs -and $Certs.Count -gt 0)) {
+                # Get app owners once per application with credentials
                 $Owner = Get-MgApplicationOwner -ApplicationId $App.Id
                 $Username = $Owner.AdditionalProperties.userPrincipalName -join ','
                 $OwnerID = $Owner.Id -join ','
@@ -160,100 +155,89 @@ function Get-ExpiringAppRegistrations {
                     $Username = '<<No Owner>>'
                 }
 
-                $RemainingDaysCount = ($EndDate - (Get-Date)).Days
-                $UsernameToCompare = if ($Username.Contains(",")) { $Username.Split(",") } else { $Username }
-                $isGTAdminUser = Compare-Object -IncludeEqual -ExcludeDifferent $UsernameToCompare $GTAdminUsers
-                Write-Host "[DEBUG] $(Get-Date -Format o) - Secret '$SecretName' for '$AppName' expires on $EndDate and has $RemainingDaysCount day(s) remaining."
+                # --- PROCESS SECRETS ---
+                foreach ($Secret in $Secrets) {
+                    $StartDate = $Secret.StartDateTime
+                    $EndDate = $Secret.EndDateTime
+                    $SecretName = $Secret.DisplayName
 
-                # Determine if this secret should be included
-                $include = $false
-                if ($IncludeAlreadyExpired -eq 'No') {
-                    if ($RemainingDaysCount -le $DaysUntilExpiration -and $RemainingDaysCount -ge 0 -and $isGTAdminUser) {
-                        $include = $true
+                    $RemainingDaysCount = ($EndDate - (Get-Date)).Days
+                    Write-Host "[DEBUG] $(Get-Date -Format o) - Secret '$SecretName' for '$AppName' expires on $EndDate and has $RemainingDaysCount day(s) remaining."
+
+                    # Determine if this secret should be included
+                    $include = $false
+                    if ($IncludeAlreadyExpired -eq 'No') {
+                        if ($RemainingDaysCount -le $DaysUntilExpiration -and $RemainingDaysCount -ge 0) {
+                            $include = $true
+                        }
                     }
-                }
-                elseif ($IncludeAlreadyExpired -eq 'Yes') {
-                    if ($RemainingDaysCount -le $DaysUntilExpiration -and $isGTAdminUser) {
-                        $include = $true
+                    elseif ($IncludeAlreadyExpired -eq 'Yes') {
+                        if ($RemainingDaysCount -le $DaysUntilExpiration) {
+                            $include = $true
+                        }
                     }
-                }
 
-                if ($include) {
-                    $Logs += [PSCustomObject]@{
-                        'WorkloadSource'         = 'Entra App Registration'
-                        'ApplicationName'        = $AppName
-                        'ApplicationID'          = $ApplID
-                        'Secret Name'            = $SecretName
-                        'Secret Start Date'      = $StartDate.ToString('MM/dd/yyyy')
-                        'Secret End Date'        = $EndDate.ToString('MM/dd/yyyy')
-                        'Certificate Name'       = "N/A"
-                        'Certificate Start Date' = "N/A"
-                        'Certificate End Date'   = "N/A"
-                        'Owner'                  = $Username
-                        'OwnerDisplayName'       = $OwnerDisplayName
-                        'Owner_ObjectID'         = $OwnerID
-                        'RemainingDaysCount'     = $RemainingDaysCount
-                        'CredentialType'         = 'Secret'
-                        'EndDateTime'            = $EndDate
-                    }
-                }
-            }
-
-            # --- PROCESS CERTIFICATES ---
-            foreach ($Cert in $Certs) {
-                $StartDate = $Cert.StartDateTime
-                $EndDate = $Cert.EndDateTime
-                $CertName = $Cert.DisplayName
-
-                # Get app owners
-                $Owner = Get-MgApplicationOwner -ApplicationId $App.Id
-                $Username = $Owner.AdditionalProperties.userPrincipalName -join ','
-                $OwnerID = $Owner.Id -join ','
-                $OwnerDisplayName = $Owner.AdditionalProperties.displayName -join ','
-
-                # Handle missing owner information
-                if ($null -eq $Owner.AdditionalProperties.userPrincipalName) {
-                    $Username = @($Owner.AdditionalProperties.displayName, '**<This is an Application>**') -join ' '
-                }
-                if ($null -eq $Owner.AdditionalProperties.displayName) {
-                    $Username = '<<No Owner>>'
-                }
-
-                $RemainingDaysCount = ($EndDate - (Get-Date)).Days
-                $UsernameToCompare = if ($Username.Contains(",")) { $Username.Split(",") } else { $Username }
-                $isGTAdminUser = Compare-Object -IncludeEqual -ExcludeDifferent $UsernameToCompare $GTAdminUsers
-                Write-Host "[DEBUG] $(Get-Date -Format o) - Certificate '$CertName' for '$AppName' expires on $EndDate and has $RemainingDaysCount day(s) remaining."
-
-                # Determine if this certificate should be included
-                $include = $false
-                if ($IncludeAlreadyExpired -eq 'No') {
-                    if ($RemainingDaysCount -le $DaysUntilExpiration -and $RemainingDaysCount -ge 0 -and $isGTAdminUser) {
-                        $include = $true
-                    }
-                }
-                elseif ($IncludeAlreadyExpired -eq 'Yes') {
-                    if ($RemainingDaysCount -le $DaysUntilExpiration -and $isGTAdminUser) {
-                        $include = $true
+                    if ($include) {
+                        $Logs += [PSCustomObject]@{
+                            'WorkloadSource'         = 'Entra App Registration'
+                            'ApplicationName'        = $AppName
+                            'ApplicationID'          = $ApplID
+                            'Secret Name'            = $SecretName
+                            'Secret Start Date'      = $StartDate.ToString('MM/dd/yyyy')
+                            'Secret End Date'        = $EndDate.ToString('MM/dd/yyyy')
+                            'Certificate Name'       = "N/A"
+                            'Certificate Start Date' = "N/A"
+                            'Certificate End Date'   = "N/A"
+                            'Owner'                  = $Username
+                            'OwnerDisplayName'       = $OwnerDisplayName
+                            'Owner_ObjectID'         = $OwnerID
+                            'RemainingDaysCount'     = $RemainingDaysCount
+                            'CredentialType'         = 'Secret'
+                            'EndDateTime'            = $EndDate
+                        }
                     }
                 }
 
-                if ($include) {
-                    $Logs += [PSCustomObject]@{
-                        'WorkloadSource'         = 'Entra App Registration'
-                        'ApplicationName'        = $AppName
-                        'ApplicationID'          = $ApplID
-                        'Secret Name'            = "N/A"
-                        'Secret Start Date'      = "N/A"
-                        'Secret End Date'        = "N/A"
-                        'Certificate Name'       = $CertName
-                        'Certificate Start Date' = $StartDate.ToString('MM/dd/yyyy')
-                        'Certificate End Date'   = $EndDate.ToString('MM/dd/yyyy')
-                        'Owner'                  = $Username
-                        'OwnerDisplayName'       = $OwnerDisplayName
-                        'Owner_ObjectID'         = $OwnerID
-                        'RemainingDaysCount'     = $RemainingDaysCount
-                        'CredentialType'         = 'Certificate'
-                        'EndDateTime'            = $EndDate
+                # --- PROCESS CERTIFICATES ---
+                foreach ($Cert in $Certs) {
+                    $StartDate = $Cert.StartDateTime
+                    $EndDate = $Cert.EndDateTime
+                    $CertName = $Cert.DisplayName
+
+                    $RemainingDaysCount = ($EndDate - (Get-Date)).Days
+                    Write-Host "[DEBUG] $(Get-Date -Format o) - Certificate '$CertName' for '$AppName' expires on $EndDate and has $RemainingDaysCount day(s) remaining."
+
+                    # Determine if this certificate should be included
+                    $include = $false
+                    if ($IncludeAlreadyExpired -eq 'No') {
+                        if ($RemainingDaysCount -le $DaysUntilExpiration -and $RemainingDaysCount -ge 0) {
+                            $include = $true
+                        }
+                    }
+                    elseif ($IncludeAlreadyExpired -eq 'Yes') {
+                        if ($RemainingDaysCount -le $DaysUntilExpiration) {
+                            $include = $true
+                        }
+                    }
+
+                    if ($include) {
+                        $Logs += [PSCustomObject]@{
+                            'WorkloadSource'         = 'Entra App Registration'
+                            'ApplicationName'        = $AppName
+                            'ApplicationID'          = $ApplID
+                            'Secret Name'            = "N/A"
+                            'Secret Start Date'      = "N/A"
+                            'Secret End Date'        = "N/A"
+                            'Certificate Name'       = $CertName
+                            'Certificate Start Date' = $StartDate.ToString('MM/dd/yyyy')
+                            'Certificate End Date'   = $EndDate.ToString('MM/dd/yyyy')
+                            'Owner'                  = $Username
+                            'OwnerDisplayName'       = $OwnerDisplayName
+                            'Owner_ObjectID'         = $OwnerID
+                            'RemainingDaysCount'     = $RemainingDaysCount
+                            'CredentialType'         = 'Certificate'
+                            'EndDateTime'            = $EndDate
+                        }
                     }
                 }
             }
@@ -265,6 +249,104 @@ function Get-ExpiringAppRegistrations {
     catch {
         Write-Host "[ERROR] $(Get-Date -Format o) - Failed to fetch expiring app registration details (function Get-ExpiringAppRegistrations): $($_.Exception.Message)"
         return $null
+    }
+}
+
+# =====================================================================
+# FUNCTION: Get List of All Expiring Enterprise Application SAML Certs (NEW)
+# =====================================================================
+function Get-ExpiringEnterpriseAppCerts {
+    param (
+        [int]$DaysUntilExpiration,
+        [string]$IncludeAlreadyExpired,
+        [string]$DefaultOwnerEmail
+    )
+    $EnterpriseLogs = @()
+    try {
+        Write-Host "[INFO] $(Get-Date -Format o) - Starting discovery for Enterprise Application SAML/SSO certificates."
+        $allSPs = Get-MgServicePrincipal -All -Property "id", "appId", "displayName", "keyCredentials", "servicePrincipalType"
+        Write-Host "[INFO] $(Get-Date -Format o) - Retrieved $($allSPs.Count) service principal(s) from Microsoft Graph."
+
+        $spsWithCerts = $allSPs | Where-Object { 
+            $null -ne $_.KeyCredentials -and $_.KeyCredentials.Count -gt 0 -and
+            $_.ServicePrincipalType -ne "ManagedIdentity"
+        }
+        Write-Host "[INFO] $(Get-Date -Format o) - Found $($spsWithCerts.Count) Enterprise Application(s) with uploaded certificates."
+
+        foreach ($sp in $spsWithCerts) {
+            $spName = $sp.DisplayName
+            $spAppId = $sp.AppId
+            $spId = $sp.Id
+
+            $ownerEmail = $DefaultOwnerEmail
+            $ownerDisplayName = $DefaultOwnerEmail
+            try {
+                $spOwners = Get-MgServicePrincipalOwner -ServicePrincipalId $spId -ErrorAction SilentlyContinue
+                if ($spOwners -and $spOwners.Count -gt 0) {
+                    $emails = @()
+                    $names = @()
+                    foreach ($o in $spOwners) {
+                        $upn = $o.AdditionalProperties.userPrincipalName
+                        $mail = $o.AdditionalProperties.mail
+                        $dName = $o.AdditionalProperties.displayName
+                        $pEmail = if (-not [string]::IsNullOrWhiteSpace($mail)) { $mail } elseif (-not [string]::IsNullOrWhiteSpace($upn)) { $upn } else { $null }
+                        if ($pEmail) { $emails += $pEmail }
+                        if ($dName) { $names += $dName }
+                    }
+                    if ($emails.Count -gt 0) { $ownerEmail = ($emails | Select-Object -Unique) -join ',' }
+                    if ($names.Count -gt 0) { $ownerDisplayName = ($names | Select-Object -Unique) -join ',' }
+                }
+            }
+            catch { }
+
+            foreach ($cert in $sp.KeyCredentials) {
+                $startDate = $cert.StartDateTime
+                $endDate = $cert.EndDateTime
+                $certName = if (-not [string]::IsNullOrWhiteSpace($cert.DisplayName)) {
+                    $cert.DisplayName
+                } elseif ($cert.Usage -eq "Sign") {
+                    "SAML SSO Signing Certificate"
+                } else {
+                    "Enterprise App Certificate"
+                }
+
+                $remainingDays = if ($endDate) { ($endDate - (Get-Date)).Days } else { 9999 }
+
+                $include = $false
+                if ($IncludeAlreadyExpired -eq 'No') {
+                    if ($remainingDays -le $DaysUntilExpiration -and $remainingDays -ge 0) { $include = $true }
+                }
+                else {
+                    if ($remainingDays -le $DaysUntilExpiration) { $include = $true }
+                }
+
+                if ($include) {
+                    $EnterpriseLogs += [PSCustomObject]@{
+                        'WorkloadSource'         = 'Entra Enterprise Application'
+                        'ApplicationName'        = $spName
+                        'ApplicationID'          = $spAppId
+                        'Secret Name'            = "N/A"
+                        'Secret Start Date'      = "N/A"
+                        'Secret End Date'        = "N/A"
+                        'Certificate Name'       = $certName
+                        'Certificate Start Date' = if ($startDate) { $startDate.ToString('MM/dd/yyyy') } else { "N/A" }
+                        'Certificate End Date'   = if ($endDate) { $endDate.ToString('MM/dd/yyyy') } else { "N/A" }
+                        'Owner'                  = $ownerEmail
+                        'OwnerDisplayName'       = $ownerDisplayName
+                        'Owner_ObjectID'         = "N/A"
+                        'RemainingDaysCount'     = $remainingDays
+                        'CredentialType'         = 'Certificate (SAML/SSO)'
+                        'EndDateTime'            = $endDate
+                    }
+                }
+            }
+        }
+        Write-Host "[INFO] $(Get-Date -Format o) - Enterprise Application discovery completed. Found $($EnterpriseLogs.Count) expiring certificate(s)."
+        return $EnterpriseLogs
+    }
+    catch {
+        Write-Host "[WARN] $(Get-Date -Format o) - Enterprise Application check encountered an issue: $($_.Exception.Message)"
+        return $EnterpriseLogs
     }
 }
 
@@ -474,7 +556,7 @@ function Get-ExpiringAppGatewayCerts {
                         if ([string]::IsNullOrWhiteSpace($sslCert.PublicCertData)) {
                             # Check if this cert is Key Vault-linked
                             if ($sslCert.KeyVaultSecretId) {
-                                Write-Host "[INFO] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' is Key Vault-linked (KV SecretId: $($sslCert.KeyVaultSecretId)). Skipping — covered by KV Secret monitoring."
+                                Write-Host "[INFO] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' is Key Vault-linked (KV SecretId: $($sslCert.KeyVaultSecretId)). Skipping - covered by KV Secret monitoring."
                             }
                             else {
                                 Write-Host "[WARN] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' has no PublicCertData and no KV link. Skipping."
@@ -486,7 +568,7 @@ function Get-ExpiringAppGatewayCerts {
                         $decoded = $false
                         try {
                             $certBytes = [System.Convert]::FromBase64String($sslCert.PublicCertData)
-                            $x509      = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,$certBytes)
+                            $x509      = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                             $decoded   = $true
                             Write-Host "[DEBUG] $(Get-Date -Format o) - Strategy 1 (DER decode) succeeded for '$certName'."
                         }
@@ -501,7 +583,7 @@ function Get-ExpiringAppGatewayCerts {
                                 if ($pemContent -match "-----BEGIN CERTIFICATE-----") {
                                     $innerB64  = ($pemContent -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","").Trim()
                                     $certBytes = [System.Convert]::FromBase64String($innerB64)
-                                    $x509      = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,$certBytes)
+                                    $x509      = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                                     $decoded   = $true
                                     Write-Host "[DEBUG] $(Get-Date -Format o) - Strategy 2 (PEM strip) succeeded for '$certName'."
                                 }
@@ -518,7 +600,7 @@ function Get-ExpiringAppGatewayCerts {
                                 if ($rawString -match "-----BEGIN CERTIFICATE-----") {
                                     $innerB64  = ($rawString -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
                                     $certBytes = [System.Convert]::FromBase64String($innerB64)
-                                    $x509      = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,$certBytes)
+                                    $x509      = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                                     $decoded   = $true
                                     Write-Host "[DEBUG] $(Get-Date -Format o) - Strategy 3 (raw PEM string) succeeded for '$certName'."
                                 }
@@ -673,11 +755,11 @@ try {
     }
 
     # =================================================================
-    # DISCOVERY: Collect expiring items from all four sources
+    # DISCOVERY: Collect expiring items from all five sources
     # =================================================================
 
     # 1. Entra App Registrations
-    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 1/4] Collecting Entra App Registration expiring secrets/certs."
+    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 1/5] Collecting Entra App Registration expiring secrets/certs."
     $AppRegLogs = Get-ExpiringAppRegistrations `
         -DaysUntilExpiration $DaysUntilExpiration `
         -IncludeAlreadyExpired $IncludeAlreadyExpired `
@@ -685,8 +767,17 @@ try {
     if ($null -eq $AppRegLogs) { $AppRegLogs = @() }
     Write-Host "[INFO] $(Get-Date -Format o) - App Registration records found: $($AppRegLogs.Count)"
 
-    # 2. Azure App Service Certificates
-    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 2/4] Collecting Azure App Service expiring certificates."
+    # 2. Entra Enterprise Applications (SAML SSO Certs - NEW)
+    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 2/5] Collecting Entra Enterprise Application expiring SAML/SSO certificates."
+    $EnterpriseAppLogs = Get-ExpiringEnterpriseAppCerts `
+        -DaysUntilExpiration $DaysUntilExpiration `
+        -IncludeAlreadyExpired $IncludeAlreadyExpired `
+        -DefaultOwnerEmail $defaultFallbackOwner
+    if ($null -eq $EnterpriseAppLogs) { $EnterpriseAppLogs = @() }
+    Write-Host "[INFO] $(Get-Date -Format o) - Enterprise Application Cert records found: $($EnterpriseAppLogs.Count)"
+
+    # 3. Azure App Service Certificates
+    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 3/5] Collecting Azure App Service expiring certificates."
     $AppSvcCertLogs = Get-ExpiringAzureResourceCerts `
         -DaysUntilExpiration $DaysUntilExpiration `
         -IncludeAlreadyExpired $IncludeAlreadyExpired `
@@ -694,8 +785,8 @@ try {
     if ($null -eq $AppSvcCertLogs) { $AppSvcCertLogs = @() }
     Write-Host "[INFO] $(Get-Date -Format o) - App Service Cert records found: $($AppSvcCertLogs.Count)"
 
-    # 3. Key Vault Secrets (NEW)
-    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 3/4] Collecting Azure Key Vault expiring secrets."
+    # 4. Key Vault Secrets (NEW)
+    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 4/5] Collecting Azure Key Vault expiring secrets."
     $KVSecretLogs = Get-ExpiringKeyVaultSecrets `
         -DaysUntilExpiration $DaysUntilExpiration `
         -IncludeAlreadyExpired $IncludeAlreadyExpired `
@@ -703,8 +794,8 @@ try {
     if ($null -eq $KVSecretLogs) { $KVSecretLogs = @() }
     Write-Host "[INFO] $(Get-Date -Format o) - Key Vault Secret records found: $($KVSecretLogs.Count)"
 
-    # 4. Application Gateway SSL Certificates (NEW)
-    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 4/4] Collecting Application Gateway expiring SSL certificates."
+    # 5. Application Gateway SSL Certificates (NEW)
+    Write-Host "[INFO] $(Get-Date -Format o) - [SOURCE 5/5] Collecting Application Gateway expiring SSL certificates."
     $AppGwCertLogs = Get-ExpiringAppGatewayCerts `
         -DaysUntilExpiration $DaysUntilExpiration `
         -IncludeAlreadyExpired $IncludeAlreadyExpired `
@@ -715,6 +806,7 @@ try {
     # Combine all sources
     $allExpiringRecords  = @()
     $allExpiringRecords += $AppRegLogs
+    $allExpiringRecords += $EnterpriseAppLogs
     $allExpiringRecords += $AppSvcCertLogs
     $allExpiringRecords += $KVSecretLogs
     $allExpiringRecords += $AppGwCertLogs
@@ -749,10 +841,11 @@ try {
             $expiredCount = ($group.Group | Where-Object { $_.RemainingDaysCount -le 0 }).Count
             $urgentCount  = ($group.Group | Where-Object { $_.RemainingDaysCount -le 7  -and $_.RemainingDaysCount -gt 0 }).Count
             $soonCount    = ($group.Group | Where-Object { $_.RemainingDaysCount -le 14 -and $_.RemainingDaysCount -gt 7 }).Count
-            $countAppReg  = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Entra App Registration' }).Count
-            $countAppSvc  = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure App Service Cert' }).Count
-            $countKV      = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure Key Vault Secret' }).Count
-            $countAppGw   = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure Application Gateway' }).Count
+            $countAppReg     = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Entra App Registration' }).Count
+            $countEnterprise = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Entra Enterprise Application' }).Count
+            $countAppSvc     = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure App Service Cert' }).Count
+            $countKV         = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure Key Vault Secret' }).Count
+            $countAppGw      = ($group.Group | Where-Object { $_.WorkloadSource -eq 'Azure Application Gateway' }).Count
 
             # BUILD EMAIL BODY
             $mailbody += '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
@@ -769,10 +862,11 @@ try {
             $mailbody += '.summary { background-color: #f9f9f9; border-left: 4px solid #203864; padding: 10px 15px; margin-top: 15px; }'
             $mailbody += '.footer  { margin-top: 25px; font-size: 12px; color: #666; border-top: 1px solid #ccc; padding-top: 10px; }'
             $mailbody += '.badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; color: white; }'
-            $mailbody += '.src-appreg   { background-color: #203864; }'
-            $mailbody += '.src-appsvc   { background-color: #217346; }'
-            $mailbody += '.src-keyvault { background-color: #7B3F00; }'
-            $mailbody += '.src-appgw    { background-color: #6B2D8B; }'
+            $mailbody += '.src-appreg     { background-color: #203864; }'
+            $mailbody += '.src-enterprise { background-color: #C00000; }'
+            $mailbody += '.src-appsvc     { background-color: #217346; }'
+            $mailbody += '.src-keyvault   { background-color: #7B3F00; }'
+            $mailbody += '.src-appgw      { background-color: #6B2D8B; }'
             $mailbody += '</style></head><body>'
 
             $mailbody += '<h2>&#9888; Azure Credential &amp; Certificate Expiration Alert</h2>'
@@ -795,11 +889,12 @@ try {
                 elseif ($daysRemaining -le 14) { $rowClass = "crtcn" }
 
                 $sourceBadgeClass = switch ($source) {
-                    'Entra App Registration'    { 'src-appreg' }
-                    'Azure App Service Cert'    { 'src-appsvc' }
-                    'Azure Key Vault Secret'    { 'src-keyvault' }
-                    'Azure Application Gateway' { 'src-appgw' }
-                    default                     { 'src-appreg' }
+                    'Entra App Registration'       { 'src-appreg' }
+                    'Entra Enterprise Application' { 'src-enterprise' }
+                    'Azure App Service Cert'       { 'src-appsvc' }
+                    'Azure Key Vault Secret'       { 'src-keyvault' }
+                    'Azure Application Gateway'    { 'src-appgw' }
+                    default                        { 'src-appreg' }
                 }
 
                 if ($credType -eq "Secret") {
@@ -833,16 +928,17 @@ try {
 
             # Summary block
             $mailbody += '<div class="summary">'
-            $mailbody += "<p><b>Summary for $appName:</b></p><ul>"
+            $mailbody += "<p><b>Summary for $($appName):</b></p><ul>"
             $mailbody += "<li>Total Credentials/Certificates: $totalCreds</li>"
             if ($expiredCount -gt 0) { $mailbody += "<li><b style='color: #c00000;'>Already Expired: $expiredCount</b></li>" }
             if ($urgentCount  -gt 0) { $mailbody += "<li><b style='color: #0070c0;'>Expiring within 7 days: $urgentCount</b></li>" }
             if ($soonCount    -gt 0) { $mailbody += "<li><b style='color: #ff9800;'>Expiring within 14 days: $soonCount</b></li>" }
             $mailbody += '</ul><p><b>Source Breakdown:</b></p><ul>'
-            if ($countAppReg -gt 0) { $mailbody += "<li>Entra App Registration: $countAppReg item(s)</li>" }
-            if ($countAppSvc -gt 0) { $mailbody += "<li>Azure App Service Cert: $countAppSvc item(s)</li>" }
-            if ($countKV     -gt 0) { $mailbody += "<li>Azure Key Vault Secret: $countKV item(s)</li>" }
-            if ($countAppGw  -gt 0) { $mailbody += "<li>Azure Application Gateway: $countAppGw item(s)</li>" }
+            if ($countAppReg -gt 0)     { $mailbody += "<li>Entra App Registration: $countAppReg item(s)</li>" }
+            if ($countEnterprise -gt 0) { $mailbody += "<li>Entra Enterprise Application: $countEnterprise item(s)</li>" }
+            if ($countAppSvc -gt 0)     { $mailbody += "<li>Azure App Service Cert: $countAppSvc item(s)</li>" }
+            if ($countKV     -gt 0)     { $mailbody += "<li>Azure Key Vault Secret: $countKV item(s)</li>" }
+            if ($countAppGw  -gt 0)     { $mailbody += "<li>Azure Application Gateway: $countAppGw item(s)</li>" }
             $mailbody += '</ul></div>'
 
             # Action steps
@@ -851,6 +947,7 @@ try {
             $mailbody += '<br><b>Steps to rotate/renew credentials:</b><ol>'
             $mailbody += "<li>Navigate to Azure Portal &rarr; locate the affected resource: <b>$appName</b></li>"
             $mailbody += '<li>For <b>App Registrations</b>: Go to <b>Certificates &amp; secrets</b> and add a new secret or certificate</li>'
+            $mailbody += '<li>For <b>Enterprise Applications</b>: Go to <b>Enterprise applications</b> &rarr; Single sign-on &rarr; SAML Certificates &rarr; Edit/Rotate certificate</li>'
             $mailbody += '<li>For <b>Key Vault Secrets</b>: Go to the Key Vault &rarr; Secrets &rarr; create a new version or update the expiry date</li>'
             $mailbody += '<li>For <b>App Service Certificates</b>: Navigate to the certificate resource and click Renew</li>'
             $mailbody += '<li>For <b>Application Gateway</b>: Go to the gateway &rarr; Listeners &rarr; SSL Certificate &rarr; upload the renewed certificate</li>'
@@ -868,6 +965,7 @@ try {
             # Source badge legend
             $mailbody += '<p style="margin-top: 10px;"><b>Source Badge Legend:</b></p><ul>'
             $mailbody += '<li><span style="background-color: #203864; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px;">Entra App Registration</span> = Entra ID App Registration Secrets &amp; Certs</li>'
+            $mailbody += '<li><span style="background-color: #C00000; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px;">Entra Enterprise Application</span> = Enterprise App SAML SSO &amp; Token Signing Certs</li>'
             $mailbody += '<li><span style="background-color: #217346; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px;">Azure App Service Cert</span> = Azure App Service Certificates</li>'
             $mailbody += '<li><span style="background-color: #7B3F00; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px;">Azure Key Vault Secret</span> = Key Vault Secrets with Expiry Set</li>'
             $mailbody += '<li><span style="background-color: #6B2D8B; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px;">Azure Application Gateway</span> = Application Gateway SSL Certificates</li>'
