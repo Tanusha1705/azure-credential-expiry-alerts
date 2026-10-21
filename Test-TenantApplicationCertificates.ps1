@@ -193,34 +193,9 @@ function Connect-ToGraph {
             Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $credential -NoWelcome -ErrorAction Stop
         }
         else {
-            # Case 2: Azure Cloud Shell automatic session inheritance
-            $inCloudShell = ($env:ACC_PORT -or $env:AZURE_HTTP_USER_AGENT -like "*cloud-shell*" -or [System.Environment]::GetEnvironmentVariable("AZURE_CONSOLE") -or (Get-Command Get-AzAccessToken -ErrorAction SilentlyContinue))
-            if ($inCloudShell -and -not $UseDeviceCode) {
-                try {
-                    $azContext = Get-AzContext -ErrorAction SilentlyContinue
-                    if ($azContext) {
-                        Write-Host "[INFO] Detected Azure Cloud Shell session ($($azContext.Account.Id)). Acquiring Graph token..." -ForegroundColor Cyan
-                        $tokenObj = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction SilentlyContinue
-                        if (-not $tokenObj) {
-                            $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction SilentlyContinue
-                        }
-                        if ($tokenObj -and $tokenObj.Token) {
-                            $secToken = ConvertTo-SecureString $tokenObj.Token -AsPlainText -Force
-                            Connect-MgGraph -AccessToken $secToken -NoWelcome -ErrorAction SilentlyContinue
-                            $activeContext = Get-MgContext -ErrorAction SilentlyContinue
-                            if ($activeContext) {
-                                Write-Host "[SUCCESS] Connected to Microsoft Graph using Cloud Shell session!" -ForegroundColor Green
-                                return
-                            }
-                        }
-                    }
-                }
-                catch {
-                    Write-Host "[DEBUG] Cloud Shell token handoff skipped, proceeding to device/interactive login." -ForegroundColor Gray
-                }
-            }
-
-            # Case 3: Interactive or Device Code Authentication
+            $inCloudShell = ($env:ACC_PORT -or $env:AZURE_HTTP_USER_AGENT -like "*cloud-shell*" -or [System.Environment]::GetEnvironmentVariable("AZURE_CONSOLE") -or [System.Environment]::OSVersion.Platform -eq "Unix")
+            
+            # Interactive or Device Code Authentication
             $connectParams = @{
                 Scopes    = @("Application.Read.All", "User.Read.All")
                 NoWelcome = $true
@@ -229,10 +204,10 @@ function Connect-ToGraph {
                 $connectParams["TenantId"] = $TenantId
             }
 
-            # If in Cloud Shell or on Linux without GUI, or explicitly requested, use device code authentication
-            $isHeadless = ($UseDeviceCode -or $inCloudShell -or [System.Environment]::OSVersion.Platform -eq "Unix")
-            if ($isHeadless) {
-                Write-Host "[INFO] Authenticating via Device Code (open the URL and enter the code displayed below)..." -ForegroundColor Cyan
+            # If in Cloud Shell, Linux, or explicitly requested, use Device Code authentication
+            if ($UseDeviceCode -or $inCloudShell) {
+                Write-Host "[INFO] Authenticating to Microsoft Graph via Device Code..." -ForegroundColor Cyan
+                Write-Host "[ACTION] Open the URL and enter the code displayed below to sign in:" -ForegroundColor Yellow
                 $connectParams["UseDeviceAuthentication"] = $true
             }
             else {
