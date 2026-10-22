@@ -48,8 +48,8 @@
 
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $false)]
-    [string[]]$ManagementGroupId = @("ac-1.1", "ac-1.2"),
+    [Parameter(Mandatory = $true, HelpMessage = "One or more Management Group IDs or Display Names. E.g.: -ManagementGroupId 'ac-1.1','ac-1.2'")]
+    [string[]]$ManagementGroupId,
 
     [Parameter(Mandatory = $false)]
     [string]$OutputPath = $PSScriptRoot,
