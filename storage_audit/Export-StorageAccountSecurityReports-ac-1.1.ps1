@@ -59,8 +59,12 @@ param (
     [ValidateSet('Csv', 'Excel', 'Both')]
     [string]$Format = 'Csv',
 
+    # =========================================================================
+    # EDIT MANAGEMENT GROUP(S) HERE:
+    # You can modify, add, or remove Management Group IDs in this array:
+    # =========================================================================
     [Parameter(Mandatory = $false)]
-    [string[]]$ManagementGroupId,
+    [string[]]$ManagementGroupId = @("ac-1.1", "ac-1.2"),
 
     [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds

@@ -43,8 +43,12 @@
 
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true, HelpMessage = "One or more Management Group IDs or Display Names. E.g.: -ManagementGroupId 'ac-1.1','ac-1.2'")]
-    [string[]]$ManagementGroupId,
+    # =========================================================================
+    # EDIT MANAGEMENT GROUP(S) HERE:
+    # You can modify, add, or remove Management Group IDs in this array:
+    # =========================================================================
+    [Parameter(Mandatory = $false, HelpMessage = "One or more Management Group IDs or Display Names. E.g.: -ManagementGroupId 'ac-1.1','ac-1.2'")]
+    [string[]]$ManagementGroupId = @("ac-1.1", "ac-1.2"),
 
     [Parameter(Mandatory = $false)]
     [string]$OutputPath = $PSScriptRoot,
