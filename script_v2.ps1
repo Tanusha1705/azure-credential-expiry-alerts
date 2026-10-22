@@ -451,8 +451,43 @@ function Get-ExpiringKeyVaultSecrets {
                         if ([string]::IsNullOrWhiteSpace($ownerTag)) { $ownerTag = $kvDetails.Tags['WorkloadOwner'] }
                         if ([string]::IsNullOrWhiteSpace($ownerTag)) { $ownerTag = $kvDetails.Tags['TechnicalContact'] }
                         $ownerVal  = if ([string]::IsNullOrWhiteSpace($ownerTag)) { $DefaultOwnerEmail } else { $ownerTag }
-                        $secrets   = Get-AzKeyVaultSecret -VaultName $kvName -ErrorAction Stop
 
+                        # 1. Inspect Key Vault Certificates
+                        try {
+                            $certs = Get-AzKeyVaultCertificate -VaultName $kvName -ErrorAction SilentlyContinue
+                            if ($certs) {
+                                foreach ($c in $certs) {
+                                    $expDate = if ($c.Expires) { $c.Expires } elseif ($c.Attributes -and $c.Attributes.Expires) { $c.Attributes.Expires } else { $null }
+                                    if ($null -ne $expDate) {
+                                        $daysRemaining = ($expDate - (Get-Date)).Days
+                                        $include = if ($IncludeAlreadyExpired -eq 'No') { $daysRemaining -le $DaysUntilExpiration -and $daysRemaining -ge 0 } else { $daysRemaining -le $DaysUntilExpiration }
+                                        if ($include) {
+                                            Write-Host "[DEBUG] $(Get-Date -Format o) - KV Certificate '$($c.Name)' in '$kvName' expires on $expDate ($daysRemaining day(s) remaining)."
+                                            $KVLogs += [PSCustomObject]@{
+                                                'WorkloadSource'         = 'Azure Key Vault Certificate'
+                                                'ApplicationName'        = "$kvName ($kvRg)"
+                                                'ApplicationID'          = $kv.ResourceId
+                                                'Secret Name'            = "N/A"
+                                                'Secret Start Date'      = "N/A"
+                                                'Secret End Date'        = "N/A"
+                                                'Certificate Name'       = "$($c.Name) | Thumbprint: $($c.Thumbprint)"
+                                                'Certificate Start Date' = "N/A"
+                                                'Certificate End Date'   = $expDate.ToString('MM/dd/yyyy')
+                                                'Owner'                  = $ownerVal
+                                                'OwnerDisplayName'       = $ownerVal
+                                                'Owner_ObjectID'         = "N/A"
+                                                'RemainingDaysCount'     = $daysRemaining
+                                                'CredentialType'         = 'Certificate'
+                                                'EndDateTime'            = $expDate
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch { }
+
+                        # 2. Inspect Key Vault Secrets
+                        $secrets = Get-AzKeyVaultSecret -VaultName $kvName -ErrorAction Stop
                         foreach ($secret in $secrets) {
                             if ($null -ne $secret.Expires) {
                                 $expDate       = $secret.Expires
@@ -544,22 +579,43 @@ function Get-ExpiringAppGatewayCerts {
                 $certCount   = $fullAgw.SslCertificates.Count
                 Write-Host "[INFO] $(Get-Date -Format o) - AppGW '$agwName' has $certCount SSL certificate(s) attached."
 
+                # Map HTTP Listeners and Hostnames
+                $certListenerMap = @{}
+                if ($fullAgw.HttpListeners) {
+                    foreach ($lst in $fullAgw.HttpListeners) {
+                        $certRef = $lst.SslCertificate.Id
+                        if ($certRef) {
+                            $cName = $certRef.Split('/')[-1]
+                            $hVal = if ($lst.HostName) { $lst.HostName } elseif ($lst.HostNames) { $lst.HostNames -join ', ' } else { "" }
+                            $lDesc = if ($hVal) { "$($lst.Name) ($hVal)" } else { $lst.Name }
+                            if (-not $certListenerMap.ContainsKey($cName)) { $certListenerMap[$cName] = [System.Collections.Generic.List[string]]::new() }
+                            $certListenerMap[$cName].Add($lDesc)
+                        }
+                    }
+                }
+
                 foreach ($sslCert in $fullAgw.SslCertificates) {
                     $certName = $sslCert.Name
+                    $listenersDesc = if ($certListenerMap.ContainsKey($certName)) { $certListenerMap[$certName] -join "; " } else { "Unattached / No Listener" }
                     $x509     = $null
 
                     try {
                         # -------------------------------------------------------
-                        # PublicCertData is populated for DIRECTLY uploaded certs.
-                        # It is null/empty for Key Vault-linked certs.
+                        # Extract cert data from PublicCertData or Data
                         # -------------------------------------------------------
-                        if ([string]::IsNullOrWhiteSpace($sslCert.PublicCertData)) {
+                        $certData = if (-not [string]::IsNullOrWhiteSpace($sslCert.PublicCertData)) { $sslCert.PublicCertData }
+                                    elseif (-not [string]::IsNullOrWhiteSpace($sslCert.Data)) { $sslCert.Data }
+                                    elseif ($sslCert.properties -and -not [string]::IsNullOrWhiteSpace($sslCert.properties.publicCertData)) { $sslCert.properties.publicCertData }
+                                    elseif ($sslCert.properties -and -not [string]::IsNullOrWhiteSpace($sslCert.properties.data)) { $sslCert.properties.data }
+                                    else { $null }
+
+                        if ([string]::IsNullOrWhiteSpace($certData)) {
                             # Check if this cert is Key Vault-linked
                             if ($sslCert.KeyVaultSecretId) {
-                                Write-Host "[INFO] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' is Key Vault-linked (KV SecretId: $($sslCert.KeyVaultSecretId)). Skipping - covered by KV Secret monitoring."
+                                Write-Host "[INFO] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' is Key Vault-linked (KV SecretId: $($sslCert.KeyVaultSecretId)). Skipping - covered by Key Vault monitoring."
                             }
                             else {
-                                Write-Host "[WARN] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' has no PublicCertData and no KV link. Skipping."
+                                Write-Host "[WARN] $(Get-Date -Format o) - SSL cert '$certName' on '$agwName' has no PublicCertData/Data and no KV link. Skipping."
                             }
                             continue
                         }
@@ -567,7 +623,7 @@ function Get-ExpiringAppGatewayCerts {
                         # --- Strategy 1: Raw Base64 -> DER bytes -> X509Certificate2 (most common for direct upload) ---
                         $decoded = $false
                         try {
-                            $certBytes = [System.Convert]::FromBase64String($sslCert.PublicCertData)
+                            $certBytes = [System.Convert]::FromBase64String($certData.Trim())
                             $x509      = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                             $decoded   = $true
                             Write-Host "[DEBUG] $(Get-Date -Format o) - Strategy 1 (DER decode) succeeded for '$certName'."
@@ -579,9 +635,9 @@ function Get-ExpiringAppGatewayCerts {
                         # --- Strategy 2: Strip PEM headers if present, then decode inner Base64 ---
                         if (-not $decoded) {
                             try {
-                                $pemContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($sslCert.PublicCertData))
+                                $pemContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($certData.Trim()))
                                 if ($pemContent -match "-----BEGIN CERTIFICATE-----") {
-                                    $innerB64  = ($pemContent -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","").Trim()
+                                    $innerB64  = ($pemContent -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
                                     $certBytes = [System.Convert]::FromBase64String($innerB64)
                                     $x509      = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                                     $decoded   = $true
@@ -596,7 +652,7 @@ function Get-ExpiringAppGatewayCerts {
                         # --- Strategy 3: Treat PublicCertData as already-decoded UTF8 PEM string ---
                         if (-not $decoded) {
                             try {
-                                $rawString = $sslCert.PublicCertData.Trim()
+                                $rawString = $certData.Trim()
                                 if ($rawString -match "-----BEGIN CERTIFICATE-----") {
                                     $innerB64  = ($rawString -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
                                     $certBytes = [System.Convert]::FromBase64String($innerB64)
@@ -641,7 +697,7 @@ function Get-ExpiringAppGatewayCerts {
                                 'Secret Name'            = "N/A"
                                 'Secret Start Date'      = "N/A"
                                 'Secret End Date'        = "N/A"
-                                'Certificate Name'       = "$certName | Subject: $subject | Thumbprint: $thumbprint"
+                                'Certificate Name'       = "$certName | Subject: $subject | Listeners: $listenersDesc | Thumbprint: $thumbprint"
                                 'Certificate Start Date' = $startDate.ToString('MM/dd/yyyy')
                                 'Certificate End Date'   = $expDate.ToString('MM/dd/yyyy')
                                 'Owner'                  = $ownerVal

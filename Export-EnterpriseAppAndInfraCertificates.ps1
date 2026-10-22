@@ -92,7 +92,7 @@ param (
     [bool]$IncludeEnterpriseApps = $true,
 
     [Parameter(Mandatory = $false)]
-    [switch]$IncludeAzureResources,
+    [bool]$IncludeAzureResources = $true,
 
     [Parameter(Mandatory = $false)]
     [string]$TenantId,
@@ -361,6 +361,52 @@ function Format-Thumbprint {
     return $KeyId
 }
 
+# Helper: Decode multi-format PublicCertData (DER Base64, PEM Base64, raw PEM)
+function ConvertFrom-PublicCertData {
+    param([string]$certData)
+
+    if ([string]::IsNullOrWhiteSpace($certData)) { return $null }
+
+    $clean = $certData.Trim()
+    
+    # Strategy 1: Direct Base64 to DER bytes -> X509Certificate2
+    try {
+        $bytes = [System.Convert]::FromBase64String($clean)
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+        if ($cert -and $cert.Thumbprint) { return $cert }
+    } catch { }
+
+    # Strategy 2: Base64-encoded PEM string -> decode outer base64, extract PEM body, decode inner base64
+    try {
+        $decodedText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($clean))
+        if ($decodedText -match "-----BEGIN CERTIFICATE-----") {
+            $inner = ($decodedText -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
+            $bytes = [System.Convert]::FromBase64String($inner)
+            $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+            if ($cert -and $cert.Thumbprint) { return $cert }
+        }
+    } catch { }
+
+    # Strategy 3: Raw PEM string (not outer base64)
+    try {
+        if ($clean -match "-----BEGIN CERTIFICATE-----") {
+            $inner = ($clean -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
+            $bytes = [System.Convert]::FromBase64String($inner)
+            $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+            if ($cert -and $cert.Thumbprint) { return $cert }
+        }
+    } catch { }
+
+    # Strategy 4: Raw UTF8 bytes directly
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($clean)
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+        if ($cert -and $cert.Thumbprint) { return $cert }
+    } catch { }
+
+    return $null
+}
+
 # -------------------------------------------------------------------------
 # 3. DISCOVERY: ENTRA ID ENTERPRISE APPLICATIONS (SAML SSO & TOKEN ENCRYPTION)
 # -------------------------------------------------------------------------
@@ -499,22 +545,31 @@ if ($IncludeEnterpriseApps) {
 if ($IncludeAzureResources) {
     Write-Host "`n[STEP 2/2] Scanning Azure Infrastructure (App Services, Key Vaults, App Gateways)..." -ForegroundColor Cyan
 
-    $hasArg = [bool](Get-Command Search-AzGraph -ErrorAction SilentlyContinue)
+    $hasArg   = [bool](Get-Command Search-AzGraph -ErrorAction SilentlyContinue)
+    $hasAzCli = [bool](Get-Command az -ErrorAction SilentlyContinue)
 
-    if ($hasArg) {
+    if ($hasArg -or $hasAzCli) {
+        # ---------------------------------------------------------------------
         # 1. App Service Certificates
+        # ---------------------------------------------------------------------
         Write-Host "  -> Querying Azure App Service Certificates..." -ForegroundColor Gray
-        try {
-            $argAppService = @"
-            resources
-            | where type =~ 'microsoft.web/certificates'
-            | project name, id, resourceGroup, subscriptionId,
-                      expirationDate = todatetime(properties.expirationDate),
-                      thumbprint     = tostring(properties.thumbprint),
-                      issuer         = tostring(properties.issuer),
-                      ownerTag       = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
+        $webCerts = @()
+        if ($hasArg) {
+            try {
+                $argAppService = @"
+                resources
+                | where type =~ 'microsoft.web/certificates'
+                | project name, id, resourceGroup, subscriptionId,
+                          expirationDate = todatetime(properties.expirationDate),
+                          thumbprint     = tostring(properties.thumbprint),
+                          issuer         = tostring(properties.issuer),
+                          ownerTag       = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
 "@
-            $webCerts = Search-AzGraph -Query $argAppService -First 1000 -ErrorAction SilentlyContinue
+                $webCerts = Search-AzGraph -Query $argAppService -First 1000 -ErrorAction SilentlyContinue
+            } catch { }
+        }
+
+        if ($webCerts) {
             foreach ($wc in $webCerts) {
                 if ($wc.expirationDate) {
                     $expDate = [DateTime]$wc.expirationDate
@@ -549,139 +604,393 @@ if ($IncludeAzureResources) {
                 }
             }
         }
-        catch {
-            Write-Host "  [WARN] App Service Certificate scan encountered an issue: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
 
-        # 2. Application Gateway SSL Certificates
+        # ---------------------------------------------------------------------
+        # 2. Application Gateway SSL Certificates (Directly Uploaded & KV-Linked)
+        # ---------------------------------------------------------------------
         Write-Host "  -> Querying Azure Application Gateway SSL Certificates..." -ForegroundColor Gray
-        try {
-            $argAppGw = @"
-            resources
-            | where type =~ 'microsoft.network/applicationgateways'
-            | project name, id, resourceGroup, subscriptionId,
-                      ownerTag = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
+        $appGws = @()
+        if ($hasArg) {
+            try {
+                $argAppGw = @"
+                resources
+                | where type =~ 'microsoft.network/applicationgateways'
+                | project name, id, resourceGroup, subscriptionId,
+                          sslCertificates = properties.sslCertificates,
+                          httpListeners = properties.httpListeners,
+                          trustedRootCertificates = properties.trustedRootCertificates,
+                          ownerTag = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
 "@
-            $appGws = Search-AzGraph -Query $argAppGw -First 1000 -ErrorAction SilentlyContinue
-            foreach ($ag in $appGws) {
-                try {
-                    $null = Set-AzContext -SubscriptionId $ag.subscriptionId -ErrorAction SilentlyContinue
-                    $fullAgw = Get-AzApplicationGateway -Name $ag.name -ResourceGroupName $ag.resourceGroup -ErrorAction SilentlyContinue
-                    if ($fullAgw.SslCertificates) {
-                        foreach ($sslCert in $fullAgw.SslCertificates) {
-                            $x509 = $null
-                            try {
-                                if ($sslCert.PublicCertData) {
-                                    $certBytes = [System.Convert]::FromBase64String($sslCert.PublicCertData)
-                                    $x509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
-                                } elseif ($sslCert.Data) {
-                                    $certBytes = [System.Convert]::FromBase64String($sslCert.Data)
-                                    $x509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
-                                }
+                $appGws = Search-AzGraph -Query $argAppGw -First 1000 -ErrorAction SilentlyContinue
+            } catch { }
+        }
 
-                                if ($x509) {
-                                    $expDate  = $x509.NotAfter
-                                    $daysLeft = ($expDate - (Get-Date)).Days
-                                    $ownerVal = if (-not [string]::IsNullOrWhiteSpace($ag.ownerTag)) { $ag.ownerTag } else { $FallbackOwnerEmail }
-
-                                    $include = if ($AllCertificates) { $true } elseif ($IncludeAlreadyExpired) { $daysLeft -le $DaysUntilExpiration } else { $daysLeft -le $DaysUntilExpiration -and $daysLeft -ge 0 }
-                                    $status  = if ($daysLeft -lt 0) { "EXPIRED" } elseif ($daysLeft -le 14) { "EXPIRING URGENT (<= 14 Days)" } elseif ($daysLeft -le 30) { "EXPIRING SOON (<= 30 Days)" } else { "HEALTHY / ACTIVE" }
-
-                                    if ($include) {
-                                        $allDiscoveredRecords.Add([PSCustomObject]@{
-                                            WorkloadSource         = "Azure Application Gateway SSL"
-                                            ApplicationName        = "$($ag.name) ($($ag.resourceGroup))"
-                                            ApplicationID          = $ag.id
-                                            ObjectID               = $sslCert.Id
-                                            CredentialType         = "Certificate (App Gateway SSL)"
-                                            CertificateName        = "$($sslCert.Name) | Subject: $($x509.Subject)"
-                                            Usage                  = "SSL/TLS Listener"
-                                            Thumbprint             = $x509.Thumbprint
-                                            KeyId                  = "N/A"
-                                            StartDate              = $x509.NotBefore.ToString("yyyy-MM-dd")
-                                            EndDate                = $expDate.ToString("yyyy-MM-dd")
-                                            DaysRemaining          = $daysLeft
-                                            Status                 = $status
-                                            OwnerEmails            = $ownerVal
-                                            OwnerDisplayNames      = $ownerVal
-                                            IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
-                                            ResourceGroup          = $ag.resourceGroup
-                                            SubscriptionId         = $ag.subscriptionId
-                                        })
-                                    }
-                                    $x509.Dispose()
-                                }
-                            }
-                            catch {
-                                if ($x509) { try { $x509.Dispose() } catch {} }
-                            }
+        # Fallback to az CLI if ARG returned 0 or wasn't available
+        if ((-not $appGws -or $appGws.Count -eq 0) -and $hasAzCli) {
+            try {
+                $rawAgwCli = az network application-gateway list -o json 2>$null
+                if ($LASTEXITCODE -eq 0 -and $rawAgwCli) {
+                    $cliGws = ($rawAgwCli -join "`n") | ConvertFrom-Json
+                    if ($cliGws) {
+                        $appGws = [System.Collections.Generic.List[PSObject]]::new()
+                        foreach ($cg in $cliGws) {
+                            $subIdFromId = if ($cg.id) { $cg.id.Split('/')[2] } else { "" }
+                            $appGws.Add([PSCustomObject]@{
+                                name                    = $cg.name
+                                id                      = $cg.id
+                                resourceGroup           = $cg.resourceGroup
+                                subscriptionId          = $subIdFromId
+                                sslCertificates         = $cg.sslCertificates
+                                httpListeners           = $cg.httpListeners
+                                trustedRootCertificates = $cg.trustedRootCertificates
+                                ownerTag                = $null
+                            })
                         }
                     }
                 }
-                catch { }
-            }
-        }
-        catch {
-            Write-Host "  [WARN] Application Gateway SSL Certificate scan encountered an issue: $($_.Exception.Message)" -ForegroundColor Yellow
+            } catch { }
         }
 
+        Write-Host "     Found $($appGws.Count) Application Gateway(s) to inspect." -ForegroundColor Gray
+
+        foreach ($ag in $appGws) {
+            $agwName = $ag.name
+            $agwRg   = $ag.resourceGroup
+            $subId   = $ag.subscriptionId
+            $ownerVal = if (-not [string]::IsNullOrWhiteSpace($ag.ownerTag)) { $ag.ownerTag } else { $FallbackOwnerEmail }
+
+            # Retrieve full gateway object from ARM to access publicCertData and httpListeners
+            $fullAgw = $null
+            if (Get-Command Get-AzApplicationGateway -ErrorAction SilentlyContinue) {
+                try {
+                    $null = Set-AzContext -SubscriptionId $subId -ErrorAction SilentlyContinue
+                    $fullAgw = Get-AzApplicationGateway -Name $agwName -ResourceGroupName $agwRg -ErrorAction SilentlyContinue
+                } catch { }
+            }
+
+            if (-not $fullAgw -and $hasAzCli) {
+                try {
+                    $rawAgwJson = az network application-gateway show --subscription $subId -g $agwRg -n $agwName -o json 2>$null
+                    if ($LASTEXITCODE -eq 0 -and $rawAgwJson) {
+                        $fullAgw = ($rawAgwJson -join "`n") | ConvertFrom-Json
+                    }
+                } catch { }
+            }
+
+            # Extract sslCertificates from full gateway or ARG stub
+            $sslCerts = $null
+            if ($fullAgw) {
+                if ($fullAgw.SslCertificates) { $sslCerts = $fullAgw.SslCertificates }
+                elseif ($fullAgw.properties -and $fullAgw.properties.sslCertificates) { $sslCerts = $fullAgw.properties.sslCertificates }
+                elseif ($fullAgw.sslCertificates) { $sslCerts = $fullAgw.sslCertificates }
+            }
+            if (-not $sslCerts) { $sslCerts = $ag.sslCertificates }
+
+            if (-not $sslCerts -or $sslCerts.Count -eq 0) { continue }
+
+            # Build HTTP Listener & Hostname Mapping
+            $certListenerMap = @{}
+            $listeners = if ($fullAgw.HttpListeners) { $fullAgw.HttpListeners }
+                         elseif ($fullAgw.properties -and $fullAgw.properties.httpListeners) { $fullAgw.properties.httpListeners }
+                         elseif ($fullAgw.httpListeners) { $fullAgw.httpListeners }
+                         elseif ($ag.httpListeners) { $ag.httpListeners }
+                         else { @() }
+
+            foreach ($lst in $listeners) {
+                $certRef = $null
+                if ($lst.SslCertificate -and $lst.SslCertificate.Id) { $certRef = $lst.SslCertificate.Id }
+                elseif ($lst.sslCertificate -and $lst.sslCertificate.id) { $certRef = $lst.sslCertificate.id }
+                elseif ($lst.properties -and $lst.properties.sslCertificate -and $lst.properties.sslCertificate.id) { $certRef = $lst.properties.sslCertificate.id }
+
+                if ($certRef) {
+                    $cName = $certRef.Split('/')[-1]
+                    $lstName = if ($lst.Name) { $lst.Name } elseif ($lst.name) { $lst.name } else { "Listener" }
+                    $hostVal = if ($lst.HostName) { $lst.HostName }
+                               elseif ($lst.hostName) { $lst.hostName }
+                               elseif ($lst.properties -and $lst.properties.hostName) { $lst.properties.hostName }
+                               elseif ($lst.HostNames) { $lst.HostNames -join ", " }
+                               elseif ($lst.properties -and $lst.properties.hostNames) { $lst.properties.hostNames -join ", " }
+                               else { "" }
+                    
+                    $listenerLabel = if ($hostVal) { "$lstName ($hostVal)" } else { $lstName }
+                    if (-not $certListenerMap.ContainsKey($cName)) {
+                        $certListenerMap[$cName] = [System.Collections.Generic.List[string]]::new()
+                    }
+                    $certListenerMap[$cName].Add($listenerLabel)
+                }
+            }
+
+            foreach ($sslCert in $sslCerts) {
+                $certName = if ($sslCert.Name) { $sslCert.Name } elseif ($sslCert.name) { $sslCert.name } else { "ssl-cert" }
+                $certId   = if ($sslCert.Id) { $sslCert.Id } elseif ($sslCert.id) { $sslCert.id } else { "$($ag.id)/sslCertificates/$certName" }
+                $listenersDesc = if ($certListenerMap.ContainsKey($certName)) { $certListenerMap[$certName] -join "; " } else { "Unattached / No Listener" }
+
+                # Check KeyVaultSecretId
+                $kvSecretId = $null
+                if ($sslCert.KeyVaultSecretId) { $kvSecretId = $sslCert.KeyVaultSecretId }
+                elseif ($sslCert.properties -and $sslCert.properties.keyVaultSecretId) { $kvSecretId = $sslCert.properties.keyVaultSecretId }
+                elseif ($sslCert.keyVaultSecretId) { $kvSecretId = $sslCert.keyVaultSecretId }
+
+                # Check PublicCertData / Data
+                $publicData = $null
+                if ($sslCert.PublicCertData) { $publicData = $sslCert.PublicCertData }
+                elseif ($sslCert.properties -and $sslCert.properties.publicCertData) { $publicData = $sslCert.properties.publicCertData }
+                elseif ($sslCert.publicCertData) { $publicData = $sslCert.publicCertData }
+                elseif ($sslCert.Data) { $publicData = $sslCert.Data }
+                elseif ($sslCert.properties -and $sslCert.properties.data) { $publicData = $sslCert.properties.data }
+                elseif ($sslCert.data) { $publicData = $sslCert.data }
+
+                # SCENARIO A: Directly Uploaded Certificate (Decoded via X.509)
+                $x509 = ConvertFrom-PublicCertData -certData $publicData
+
+                if ($x509) {
+                    $expDate  = $x509.NotAfter
+                    $daysLeft = ($expDate - (Get-Date)).Days
+                    $include = if ($AllCertificates) { $true } elseif ($IncludeAlreadyExpired) { $daysLeft -le $DaysUntilExpiration } else { $daysLeft -le $DaysUntilExpiration -and $daysLeft -ge 0 }
+                    $status  = if ($daysLeft -lt 0) { "EXPIRED" } elseif ($daysLeft -le 14) { "EXPIRING URGENT (<= 14 Days)" } elseif ($daysLeft -le 30) { "EXPIRING SOON (<= 30 Days)" } else { "HEALTHY / ACTIVE" }
+
+                    if ($include) {
+                        $allDiscoveredRecords.Add([PSCustomObject]@{
+                            WorkloadSource         = "Azure Application Gateway SSL"
+                            ApplicationName        = "$agwName ($agwRg)"
+                            ApplicationID          = $ag.id
+                            ObjectID               = $certId
+                            CredentialType         = "Certificate (Directly Uploaded to App Gateway)"
+                            CertificateName        = "$certName | Subject: $($x509.Subject)"
+                            Usage                  = "SSL/TLS Listener: $listenersDesc"
+                            Thumbprint             = $x509.Thumbprint
+                            KeyId                  = "N/A"
+                            StartDate              = $x509.NotBefore.ToString("yyyy-MM-dd")
+                            EndDate                = $expDate.ToString("yyyy-MM-dd")
+                            DaysRemaining          = $daysLeft
+                            Status                 = $status
+                            OwnerEmails            = $ownerVal
+                            OwnerDisplayNames      = $ownerVal
+                            IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
+                            ResourceGroup          = $agwRg
+                            SubscriptionId         = $subId
+                        })
+                    }
+                    $x509.Dispose()
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($kvSecretId)) {
+                    # Key Vault linked App Gateway Certificate
+                    $allDiscoveredRecords.Add([PSCustomObject]@{
+                        WorkloadSource         = "Azure Application Gateway SSL (Key Vault)"
+                        ApplicationName        = "$agwName ($agwRg)"
+                        ApplicationID          = $ag.id
+                        ObjectID               = $certId
+                        CredentialType         = "Certificate (Key Vault Linked)"
+                        CertificateName        = "$certName (KV Reference)"
+                        Usage                  = "SSL/TLS Listener: $listenersDesc"
+                        Thumbprint             = "KeyVault-Linked"
+                        KeyId                  = $kvSecretId
+                        StartDate              = "N/A"
+                        EndDate                = "Managed in Key Vault"
+                        DaysRemaining          = 9999
+                        Status                 = "KEYVAULT LINKED"
+                        OwnerEmails            = $ownerVal
+                        OwnerDisplayNames      = $ownerVal
+                        IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
+                        ResourceGroup          = $agwRg
+                        SubscriptionId         = $subId
+                    })
+                }
+                else {
+                    # Directly uploaded certificate exists on App Gateway but raw bytes not decoded
+                    # Surface as directly uploaded record so it is NEVER silently missed
+                    $allDiscoveredRecords.Add([PSCustomObject]@{
+                        WorkloadSource         = "Azure Application Gateway SSL"
+                        ApplicationName        = "$agwName ($agwRg)"
+                        ApplicationID          = $ag.id
+                        ObjectID               = $certId
+                        CredentialType         = "Certificate (Directly Uploaded to App Gateway)"
+                        CertificateName        = "$certName (Direct AppGW Upload)"
+                        Usage                  = "SSL/TLS Listener: $listenersDesc"
+                        Thumbprint             = "Directly-Uploaded"
+                        KeyId                  = "N/A"
+                        StartDate              = "N/A"
+                        EndDate                = "Uploaded Directly to AppGW"
+                        DaysRemaining          = 9999
+                        Status                 = "DIRECTLY UPLOADED TO APPGW (Review Expiry)"
+                        OwnerEmails            = $ownerVal
+                        OwnerDisplayNames      = $ownerVal
+                        IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
+                        ResourceGroup          = $agwRg
+                        SubscriptionId         = $subId
+                    })
+                }
+            }
+        }
+
+        # ---------------------------------------------------------------------
         # 3. Key Vault Secrets & Certificates
+        # ---------------------------------------------------------------------
         Write-Host "  -> Querying Azure Key Vault Secrets & Certificates..." -ForegroundColor Gray
-        try {
-            $argKeyVaults = @"
-            resources
-            | where type =~ 'microsoft.keyvault/vaults'
-            | project name, id, resourceGroup, subscriptionId,
-                      ownerTag = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
+        $kvs = @()
+        if ($hasArg) {
+            try {
+                $argKeyVaults = @"
+                resources
+                | where type =~ 'microsoft.keyvault/vaults'
+                | project name, id, resourceGroup, subscriptionId,
+                          ownerTag = coalesce(tostring(tags.Owner), tostring(tags.owner), tostring(tags.WorkloadOwner), tostring(tags.TechnicalContact))
 "@
-            $kvs = Search-AzGraph -Query $argKeyVaults -First 500 -ErrorAction SilentlyContinue
-            foreach ($kv in $kvs) {
-                try {
-                    $null = Set-AzContext -SubscriptionId $kv.subscriptionId -ErrorAction SilentlyContinue
-                    $ownerVal = if (-not [string]::IsNullOrWhiteSpace($kv.ownerTag)) { $kv.ownerTag } else { $FallbackOwnerEmail }
+                $kvs = Search-AzGraph -Query $argKeyVaults -First 500 -ErrorAction SilentlyContinue
+            } catch { }
+        }
 
-                    $secrets = Get-AzKeyVaultSecret -VaultName $kv.name -ErrorAction SilentlyContinue
-                    foreach ($sec in $secrets) {
-                        if ($sec.Expires) {
-                            $expDate  = [DateTime]$sec.Expires
-                            $daysLeft = ($expDate - (Get-Date)).Days
-                            $include  = if ($AllCertificates) { $true } elseif ($IncludeAlreadyExpired) { $daysLeft -le $DaysUntilExpiration } else { $daysLeft -le $DaysUntilExpiration -and $daysLeft -ge 0 }
-                            $status   = if ($daysLeft -lt 0) { "EXPIRED" } elseif ($daysLeft -le 14) { "EXPIRING URGENT (<= 14 Days)" } elseif ($daysLeft -le 30) { "EXPIRING SOON (<= 30 Days)" } else { "HEALTHY / ACTIVE" }
-
-                            if ($include) {
-                                $allDiscoveredRecords.Add([PSCustomObject]@{
-                                    WorkloadSource         = "Azure Key Vault Secret"
-                                    ApplicationName        = "$($kv.name) ($($kv.resourceGroup))"
-                                    ApplicationID          = $kv.id
-                                    ObjectID               = $sec.Id
-                                    CredentialType         = "Secret"
-                                    CertificateName        = $sec.Name
-                                    Usage                  = "Key Vault Secret"
-                                    Thumbprint             = "N/A"
-                                    KeyId                  = $sec.Id
-                                    StartDate              = "N/A"
-                                    EndDate                = $expDate.ToString("yyyy-MM-dd")
-                                    DaysRemaining          = $daysLeft
-                                    Status                 = $status
-                                    OwnerEmails            = $ownerVal
-                                    OwnerDisplayNames      = $ownerVal
-                                    IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
-                                    ResourceGroup          = $kv.resourceGroup
-                                    SubscriptionId         = $kv.subscriptionId
-                                })
-                            }
+        if ((-not $kvs -or $kvs.Count -eq 0) -and $hasAzCli) {
+            try {
+                $rawKvsCli = az keyvault list -o json 2>$null
+                if ($LASTEXITCODE -eq 0 -and $rawKvsCli) {
+                    $cliKvs = ($rawKvsCli -join "`n") | ConvertFrom-Json
+                    if ($cliKvs) {
+                        $kvs = [System.Collections.Generic.List[PSObject]]::new()
+                        foreach ($ckv in $cliKvs) {
+                            $subIdFromId = if ($ckv.id) { $ckv.id.Split('/')[2] } else { "" }
+                            $kvs.Add([PSCustomObject]@{
+                                name           = $ckv.name
+                                id             = $ckv.id
+                                resourceGroup  = $ckv.resourceGroup
+                                subscriptionId = $subIdFromId
+                                ownerTag       = $null
+                            })
                         }
                     }
                 }
-                catch { }
-            }
+            } catch { }
         }
-        catch {
-            Write-Host "  [WARN] Key Vault scan encountered an issue: $($_.Exception.Message)" -ForegroundColor Yellow
+
+        Write-Host "     Found $($kvs.Count) Key Vault(s) to inspect." -ForegroundColor Gray
+
+        foreach ($kv in $kvs) {
+            $ownerVal = if (-not [string]::IsNullOrWhiteSpace($kv.ownerTag)) { $kv.ownerTag } else { $FallbackOwnerEmail }
+            $null = Set-AzContext -SubscriptionId $kv.subscriptionId -ErrorAction SilentlyContinue
+
+            # 3a. Key Vault Certificates
+            $kvCerts = $null
+            if (Get-Command Get-AzKeyVaultCertificate -ErrorAction SilentlyContinue) {
+                try {
+                    $kvCerts = Get-AzKeyVaultCertificate -VaultName $kv.name -ErrorAction Stop
+                } catch { }
+            }
+            if (-not $kvCerts -and $hasAzCli) {
+                try {
+                    $rawCliCerts = az keyvault certificate list --vault-name $kv.name -o json 2>$null
+                    if ($LASTEXITCODE -eq 0 -and $rawCliCerts) {
+                        $cliCerts = ($rawCliCerts -join "`n") | ConvertFrom-Json
+                        if ($cliCerts) {
+                            $kvCerts = @($cliCerts | ForEach-Object {
+                                [PSCustomObject]@{
+                                    Name       = $_.name
+                                    Id         = $_.id
+                                    Thumbprint = if ($_.x509ThumbprintHex) { $_.x509ThumbprintHex } else { "KV-Managed" }
+                                    Expires    = if ($_.attributes -and $_.attributes.expires) { [DateTime]$_.attributes.expires } else { $null }
+                                }
+                            })
+                        }
+                    }
+                } catch { }
+            }
+
+            if ($kvCerts) {
+                foreach ($c in $kvCerts) {
+                    $expDate = if ($c.Expires) { [DateTime]$c.Expires } elseif ($c.Attributes -and $c.Attributes.Expires) { [DateTime]$c.Attributes.Expires } else { $null }
+                    if ($expDate) {
+                        $daysLeft = ($expDate - (Get-Date)).Days
+                        $include  = if ($AllCertificates) { $true } elseif ($IncludeAlreadyExpired) { $daysLeft -le $DaysUntilExpiration } else { $daysLeft -le $DaysUntilExpiration -and $daysLeft -ge 0 }
+                        $status   = if ($daysLeft -lt 0) { "EXPIRED" } elseif ($daysLeft -le 14) { "EXPIRING URGENT (<= 14 Days)" } elseif ($daysLeft -le 30) { "EXPIRING SOON (<= 30 Days)" } else { "HEALTHY / ACTIVE" }
+
+                        if ($include) {
+                            $allDiscoveredRecords.Add([PSCustomObject]@{
+                                WorkloadSource         = "Azure Key Vault Certificate"
+                                ApplicationName        = "$($kv.name) ($($kv.resourceGroup))"
+                                ApplicationID          = $kv.id
+                                ObjectID               = $c.Id
+                                CredentialType         = "Certificate (Key Vault)"
+                                CertificateName        = $c.Name
+                                Usage                  = "Key Vault Certificate"
+                                Thumbprint             = if ($c.Thumbprint) { $c.Thumbprint } else { "KV-Managed" }
+                                KeyId                  = $c.Id
+                                StartDate              = "N/A"
+                                EndDate                = $expDate.ToString("yyyy-MM-dd")
+                                DaysRemaining          = $daysLeft
+                                Status                 = $status
+                                OwnerEmails            = $ownerVal
+                                OwnerDisplayNames      = $ownerVal
+                                IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
+                                ResourceGroup          = $kv.resourceGroup
+                                SubscriptionId         = $kv.subscriptionId
+                            })
+                        }
+                    }
+                }
+            }
+
+            # 3b. Key Vault Secrets
+            $secrets = $null
+            if (Get-Command Get-AzKeyVaultSecret -ErrorAction SilentlyContinue) {
+                try {
+                    $secrets = Get-AzKeyVaultSecret -VaultName $kv.name -ErrorAction Stop
+                } catch { }
+            }
+            if (-not $secrets -and $hasAzCli) {
+                try {
+                    $rawCliSecs = az keyvault secret list --vault-name $kv.name -o json 2>$null
+                    if ($LASTEXITCODE -eq 0 -and $rawCliSecs) {
+                        $cliSecs = ($rawCliSecs -join "`n") | ConvertFrom-Json
+                        if ($cliSecs) {
+                            $secrets = @($cliSecs | ForEach-Object {
+                                [PSCustomObject]@{
+                                    Name        = $_.name
+                                    Id          = $_.id
+                                    ContentType = $_.contentType
+                                    Expires     = if ($_.attributes -and $_.attributes.expires) { [DateTime]$_.attributes.expires } else { $null }
+                                }
+                            })
+                        }
+                    }
+                } catch { }
+            }
+
+            if ($secrets) {
+                foreach ($sec in $secrets) {
+                    if ($sec.Expires) {
+                        $expDate  = [DateTime]$sec.Expires
+                        $daysLeft = ($expDate - (Get-Date)).Days
+                        $include  = if ($AllCertificates) { $true } elseif ($IncludeAlreadyExpired) { $daysLeft -le $DaysUntilExpiration } else { $daysLeft -le $DaysUntilExpiration -and $daysLeft -ge 0 }
+                        $status   = if ($daysLeft -lt 0) { "EXPIRED" } elseif ($daysLeft -le 14) { "EXPIRING URGENT (<= 14 Days)" } elseif ($daysLeft -le 30) { "EXPIRING SOON (<= 30 Days)" } else { "HEALTHY / ACTIVE" }
+
+                        if ($include) {
+                            $allDiscoveredRecords.Add([PSCustomObject]@{
+                                WorkloadSource         = "Azure Key Vault Secret"
+                                ApplicationName        = "$($kv.name) ($($kv.resourceGroup))"
+                                ApplicationID          = $kv.id
+                                ObjectID               = $sec.Id
+                                CredentialType         = "Secret"
+                                CertificateName        = $sec.Name
+                                Usage                  = "Key Vault Secret"
+                                Thumbprint             = "N/A"
+                                KeyId                  = $sec.Id
+                                StartDate              = "N/A"
+                                EndDate                = $expDate.ToString("yyyy-MM-dd")
+                                DaysRemaining          = $daysLeft
+                                Status                 = $status
+                                OwnerEmails            = $ownerVal
+                                OwnerDisplayNames      = $ownerVal
+                                IsOrphaned             = ($ownerVal -eq $FallbackOwnerEmail)
+                                ResourceGroup          = $kv.resourceGroup
+                                SubscriptionId         = $kv.subscriptionId
+                            })
+                        }
+                    }
+                }
+            }
         }
     }
     else {
-        Write-Host "  [INFO] Az.ResourceGraph module not available; skipping infrastructure discovery." -ForegroundColor Yellow
+        Write-Host "  [INFO] Neither Az PowerShell nor Azure CLI (az) is available for infrastructure discovery." -ForegroundColor Yellow
     }
 }
 
