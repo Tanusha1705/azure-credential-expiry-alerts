@@ -146,25 +146,29 @@ SubnetName,Region,ZoneRedundancyScope,AvailableIPAddressCount,AddressPrefix,Prov
 
 ### Running Subnet Details Extraction:
 ```powershell
-# Run subnet extraction for Management Group ac-1.1:
-.\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1"
+# Run subnet extraction for any Management Group:
+.\Export-VNetSubnetDetails.ps1 -ManagementGroupId "your-management-group"
+
+# Run for multiple Management Groups together:
+.\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -Format Both
 ```
 
 ---
 
 ## 3. How to Run via Standalone Script Files
 
-If running from your computer or an automation pipeline:
+You can pass **any** Management Group name or list of Management Groups at runtime — **nothing is hardcoded**:
 
 ```powershell
 cd c:\Users\home\Downloads\exl\network_audit
 
-# 1. Run VNet Inventory (defaults to 'ac-1.1'):
-.\Export-VNetInventory-ac-1.1.ps1
+# 1. Run VNet Inventory with your desired Management Group(s):
+.\Export-VNetInventory.ps1 -ManagementGroupId "ac-1.1"
+.\Export-VNetInventory.ps1 -ManagementGroupId "ac-1.1","ac-1.2"
 
 # 2. Run and export both CSV and formatted Excel (.xlsx):
-.\Export-VNetInventory-ac-1.1.ps1 -OutputPath "C:\Reports" -Format Both
+.\Export-VNetInventory.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -OutputPath "C:\Reports" -Format Both
 
-# 3. Target a different Management Group:
-.\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "your-other-mg"
+# 3. Run Subnet Details with your desired Management Group(s):
+.\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -Format Both
 ```

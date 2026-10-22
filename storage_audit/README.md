@@ -1,4 +1,4 @@
-# Azure Storage Security Audit Reports — AWS S3 Replication
+# Azure Storage Security Audit Reports â€” AWS S3 Replication
 
 This folder contains scripts to audit **Azure Storage Account** security configurations and export them into reports that mirror the layout of AWS S3 consolidated security and Block Public Access (BPA) tracking sheets.
 
@@ -7,7 +7,7 @@ This folder contains scripts to audit **Azure Storage Account** security configu
 ## Table of Contents
 
 1. [Resource Field Descriptions](#1-resource-field-descriptions)
-2. [AWS vs Azure — Detailed Comparison](#2-aws-vs-azure--detailed-comparison)
+2. [AWS vs Azure â€” Detailed Comparison](#2-aws-vs-azure--detailed-comparison)
 3. [Report Schemas](#3-report-schemas)
 4. [Microsoft Documentation References](#4-microsoft-documentation-references)
 5. [1-Click Azure Cloud Shell Script](#5-1-click-azure-cloud-shell-script)
@@ -26,7 +26,7 @@ The following fields are collected for every Azure Storage Account. Each field m
 ### `storageaccountname`
 - **What it is:** The globally unique name of the Azure Storage Account (equivalent to an S3 bucket name).
 - **Source:** `resources.name` in Azure Resource Graph / `StorageAccountName` via Az PowerShell.
-- **Format:** Lowercase string, 3–24 characters (e.g., `mystoragedemo001`).
+- **Format:** Lowercase string, 3â€“24 characters (e.g., `mystoragedemo001`).
 - **Why it matters:** Identifies the specific storage resource being audited. Used as the primary key to match security posture per resource.
 
 ---
@@ -35,7 +35,7 @@ The following fields are collected for every Azure Storage Account. Each field m
 - **What it is:** The Azure Resource Group that contains the Storage Account.
 - **Source:** `resources.resourceGroup` in Azure Resource Graph / `ResourceGroupName` via Az PowerShell.
 - **Format:** String (e.g., `rg-prod-eastus`).
-- **Why it matters:** Resource Groups are Azure's logical containers for resource management, RBAC, and cost tracking. This field helps teams identify which team/project owns a storage account and scope remediation efforts correctly. **There is no direct AWS equivalent** — in AWS, S3 buckets exist at the account level without a grouping layer analogous to Resource Groups.
+- **Why it matters:** Resource Groups are Azure's logical containers for resource management, RBAC, and cost tracking. This field helps teams identify which team/project owns a storage account and scope remediation efforts correctly. **There is no direct AWS equivalent** â€” in AWS, S3 buckets exist at the account level without a grouping layer analogous to Resource Groups.
 
 ---
 
@@ -46,15 +46,15 @@ The following fields are collected for every Azure Storage Account. Each field m
 
   | Value | Meaning |
   |---|---|
-  | `Microsoft.Storage` | **Microsoft-Managed Keys (MMK)** — Azure manages key rotation automatically. Default setting. |
-  | `Microsoft.Keyvault` | **Customer-Managed Keys (CMK)** — The customer controls the key lifecycle via Azure Key Vault. Required for most compliance frameworks (PCI-DSS, HIPAA, ISO 27001). |
+  | `Microsoft.Storage` | **Microsoft-Managed Keys (MMK)** â€” Azure manages key rotation automatically. Default setting. |
+  | `Microsoft.Keyvault` | **Customer-Managed Keys (CMK)** â€” The customer controls the key lifecycle via Azure Key Vault. Required for most compliance frameworks (PCI-DSS, HIPAA, ISO 27001). |
 
-- **Why it matters:** CMK gives you full control over encryption keys — including the ability to revoke access instantly (equivalent to deleting your data cryptographically). MMK is simpler but gives Microsoft more control.
+- **Why it matters:** CMK gives you full control over encryption keys â€” including the ability to revoke access instantly (equivalent to deleting your data cryptographically). MMK is simpler but gives Microsoft more control.
 
 ---
 
 ### `infrastructureencryptionenabled`
-- **What it is:** Whether **double encryption** (Infrastructure Encryption) is enabled — i.e., data is encrypted at both the software/service layer AND the hardware/infrastructure layer.
+- **What it is:** Whether **double encryption** (Infrastructure Encryption) is enabled â€” i.e., data is encrypted at both the software/service layer AND the hardware/infrastructure layer.
 - **Source:** `properties.encryption.requireInfrastructureEncryption`.
 - **Possible values:**
 
@@ -63,12 +63,12 @@ The following fields are collected for every Azure Storage Account. Each field m
   | `true` | Data is encrypted **twice**: at the storage service layer (AES-256) AND at the underlying hardware level. Required for regulated industries. |
   | `false` | Data is encrypted once at the service layer only (default behavior). |
 
-- **Why it matters:** Required for compliance in highly regulated environments (government, financial, healthcare). Once set at account creation, this **cannot be changed** — making it critical to audit.
+- **Why it matters:** Required for compliance in highly regulated environments (government, financial, healthcare). Once set at account creation, this **cannot be changed** â€” making it critical to audit.
 
 ---
 
 ### `networkacldefaultaction`
-- **What it is:** The default network access rule for the Storage Account — what happens to traffic that does not match any specific allow-list rule.
+- **What it is:** The default network access rule for the Storage Account â€” what happens to traffic that does not match any specific allow-list rule.
 - **Source:** `properties.networkAcls.defaultAction`.
 - **Possible values:**
 
@@ -99,7 +99,7 @@ The following fields are collected for every Azure Storage Account. Each field m
 - **What it is:** The human-readable name of the Azure Subscription containing the Storage Account.
 - **Source:** `resourcecontainers` (subscription name lookup via join) / `Get-AzSubscription`.
 - **Format:** String (e.g., `prod-connectivity-sub`).
-- **Why it matters:** Used to group and filter audit results by business unit, environment, or account owner — analogous to AWS Account Name.
+- **Why it matters:** Used to group and filter audit results by business unit, environment, or account owner â€” analogous to AWS Account Name.
 
 ---
 
@@ -111,7 +111,7 @@ The following fields are collected for every Azure Storage Account. Each field m
 
 ---
 
-## 2. AWS vs Azure — Detailed Comparison
+## 2. AWS vs Azure â€” Detailed Comparison
 
 ### Report 1: Consolidated Security Settings
 
@@ -131,9 +131,9 @@ The following fields are collected for every Azure Storage Account. Each field m
 
 | AWS S3 Column | AWS Meaning | Azure Column | Azure Meaning | Key Differences |
 |---|---|---|---|---|
-| `accountname` | AWS Account Name | `subscriptionname` | Azure Subscription Name | Direct equivalent — human-readable billing scope name. |
-| `accountid` | AWS Account ID | `subscriptionid` | Azure Subscription ID | Direct equivalent — unique immutable billing scope ID. |
-| `publicaccessblockconfiguration` | AWS BPA — 4-flag block: `BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets` | `allowblobpublicaccess` | Single boolean: whether anonymous public blob access is permitted at the storage account level | **AWS has 4 granular flags; Azure has 1 master switch.** AWS BPA lets you block ACL-based public access while still allowing policy-based public access. Azure's single toggle is simpler but overrides all container-level settings when `false`. |
+| `accountname` | AWS Account Name | `subscriptionname` | Azure Subscription Name | Direct equivalent â€” human-readable billing scope name. |
+| `accountid` | AWS Account ID | `subscriptionid` | Azure Subscription ID | Direct equivalent â€” unique immutable billing scope ID. |
+| `publicaccessblockconfiguration` | AWS BPA â€” 4-flag block: `BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets` | `allowblobpublicaccess` | Single boolean: whether anonymous public blob access is permitted at the storage account level | **AWS has 4 granular flags; Azure has 1 master switch.** AWS BPA lets you block ACL-based public access while still allowing policy-based public access. Azure's single toggle is simpler but overrides all container-level settings when `false`. |
 
 ---
 
@@ -146,7 +146,7 @@ The following fields are collected for every Azure Storage Account. Each field m
 | **Encryption at rest** | SSE-S3 (AES-256, AWS-managed), SSE-KMS (CMK), SSE-C (customer-provided per request) | MMK (Microsoft-managed AES-256), CMK via Azure Key Vault, optional Infrastructure Encryption (double-layer) | Azure supports double encryption (infra layer); AWS has no direct equivalent |
 | **Public access control** | 4-flag Block Public Access config at account + bucket level | Single `allowBlobPublicAccess` toggle at account level + container-level public access setting | AWS is more granular; Azure's account-level toggle overrides container settings when `false` |
 | **Network access control** | S3 Bucket Policy (resource-based IAM), VPC Endpoints, S3 Access Points | Network ACL default action (Allow/Deny) + IP rules + VNet Service Endpoints + Private Endpoints | Azure separates network access (ACL) from identity access (RBAC/SAS) more explicitly |
-| **Audit tooling** | AWS Config, Security Hub, Macie, Access Analyzer | Azure Policy, Microsoft Defender for Storage, Azure Resource Graph | This script replicates the AWS audit layout using Azure Resource Graph (ARG) — equivalent to AWS Config aggregate queries |
+| **Audit tooling** | AWS Config, Security Hub, Macie, Access Analyzer | Azure Policy, Microsoft Defender for Storage, Azure Resource Graph | This script replicates the AWS audit layout using Azure Resource Graph (ARG) â€” equivalent to AWS Config aggregate queries |
 
 ---
 
@@ -216,7 +216,7 @@ storageaccountname | resourcegroup | subscriptionname | subscriptionid | allowbl
 | Management Groups | How Management Groups organize subscriptions for governance | https://learn.microsoft.com/en-us/azure/governance/management-groups/overview |
 | Azure Resource Graph (ARG) | What ARG is and how KQL queries work across subscriptions | https://learn.microsoft.com/en-us/azure/governance/resource-graph/overview |
 | Microsoft Defender for Storage | Cloud-native threat detection for Storage Accounts (equivalent to AWS Macie) | https://learn.microsoft.com/en-us/azure/defender-for-cloud/defender-for-storage-introduction |
-| Azure Policy — Storage built-ins | Built-in Azure Policy definitions for Storage Account compliance | https://learn.microsoft.com/en-us/azure/storage/common/policy-reference |
+| Azure Policy â€” Storage built-ins | Built-in Azure Policy definitions for Storage Account compliance | https://learn.microsoft.com/en-us/azure/storage/common/policy-reference |
 | Private Endpoints for Storage | Connecting to Storage Accounts via private network only | https://learn.microsoft.com/en-us/azure/storage/common/storage-private-endpoints |
 
 ---
@@ -232,27 +232,10 @@ Open **Azure Cloud Shell** (`>_` icon in the Azure Portal top bar), select **Pow
 # 1-CLICK AZURE CLOUD SHELL AUDIT SCRIPT (STRICT MANAGEMENT GROUP SCOPE)
 # ==============================================================================
 
-# 1. Target Management Group
-$mgInputs = @("ac-1.1", "ac-1.2")   # <-- Add or remove Management Group IDs here
+# 1. Target Management Group(s) — modify as needed:
+$mgInputs = @("ac-1.1", "ac-1.2")   # <-- Add or change any Management Group IDs here
 
-# 2. Resolve Management Group recursively
-Write-Host "`n[1/4] Resolving Management Group '$mgInput'..." -ForegroundColor Cyan
-$mg = Get-AzManagementGroup -GroupId $mgInput -Expand -Recurse -ErrorAction SilentlyContinue
-if (-not $mg) {
-    $allMgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
-    $matched = $allMgs | Where-Object { $_.Name -eq $mgInput -or $_.DisplayName -eq $mgInput } | Select-Object -First 1
-    if ($matched) {
-        $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
-    }
-}
-
-if (-not $mg) {
-    Throw "[ERROR] Management Group '$mgInput' was not found! Execution stopped."
-}
-
-Write-Host "[+] Matched: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
-
-# 3. Recursively extract Subscription IDs
+# 2. Recursively extract Subscription IDs across all specified Management Groups
 $discoveredSubIds = [System.Collections.Generic.List[string]]::new()
 function Find-MgSubscriptions($node) {
     if ($node.Children) {
@@ -262,15 +245,30 @@ function Find-MgSubscriptions($node) {
         }
     }
 }
-Find-MgSubscriptions $mg
 
-if ($discoveredSubIds.Count -eq 0) {
-    $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
-    if ($mgSubs) {
-        foreach ($s in $mgSubs) {
-            $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
-            if ($sid) { $discoveredSubIds.Add($sid) }
+$allMgsCache = $null
+foreach ($mgInput in $mgInputs) {
+    Write-Host "`n[1/4] Resolving Management Group: '$mgInput'..." -ForegroundColor Cyan
+    $mg = Get-AzManagementGroup -GroupId $mgInput -Expand -Recurse -ErrorAction SilentlyContinue
+    if (-not $mg) {
+        if (-not $allMgsCache) { $allMgsCache = Get-AzManagementGroup -ErrorAction SilentlyContinue }
+        $matched = $allMgsCache | Where-Object { $_.Name -eq $mgInput -or $_.DisplayName -eq $mgInput } | Select-Object -First 1
+        if ($matched) {
+            $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
         }
+    }
+    if ($mg) {
+        Write-Host "  [+] Matched: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
+        Find-MgSubscriptions $mg
+        $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
+        if ($mgSubs) {
+            foreach ($s in $mgSubs) {
+                $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
+                if ($sid) { $discoveredSubIds.Add($sid) }
+            }
+        }
+    } else {
+        Write-Host "  [WARN] Management Group '$mgInput' not found, skipping." -ForegroundColor Red
     }
 }
 
@@ -344,7 +342,7 @@ resources
 "@ -First 5000 | Export-Csv -Path "StorageAccount-bpa-detailed.csv" -NoTypeInformation -Encoding utf8
 
 Write-Host "`n========================================================" -ForegroundColor Green
-Write-Host " SUCCESS! Scanned 0 Management Group(s) � 3 files generated:" -ForegroundColor Green
+Write-Host " SUCCESS! Scanned 0 Management Group(s) — 3 files generated:" -ForegroundColor Green
 Write-Host "  1. StorageAccount-consolidated.csv" -ForegroundColor Yellow
 Write-Host "  2. StorageAccount-bpa.csv" -ForegroundColor Yellow
 Write-Host "  3. StorageAccount-bpa-detailed.csv" -ForegroundColor Yellow
@@ -356,7 +354,7 @@ Write-Host "`nDownload: Click Manage files (up/down arrow) in Cloud Shell toolba
 
 ## 6. How to Download Files
 
-1. In the Azure Cloud Shell toolbar, click the **Manage files** icon (`↕`).
+1. In the Azure Cloud Shell toolbar, click the **Manage files** icon (`â†•`).
 2. Select **Download**.
 3. Type the filename:
    - `StorageAccount-consolidated.csv`
@@ -368,9 +366,9 @@ Write-Host "`nDownload: Click Manage files (up/down arrow) in Cloud Shell toolba
 
 ## 7. KQL Queries (Resource Graph Explorer)
 
-In **Azure Portal → Resource Graph Explorer**. Replace `'YOUR_MANAGEMENT_GROUP_ID'` with your group ID or display name.
+In **Azure Portal â†’ Resource Graph Explorer**. Replace `'YOUR_MANAGEMENT_GROUP_ID'` with your group ID or display name.
 
-### Query 1 — Consolidated Report
+### Query 1 â€” Consolidated Report
 
 ```kql
 resourcecontainers
@@ -393,7 +391,7 @@ resourcecontainers
 | order by subscriptionname asc, storageaccountname asc
 ```
 
-### Query 2 — BPA Summary
+### Query 2 â€” BPA Summary
 
 ```kql
 resourcecontainers
