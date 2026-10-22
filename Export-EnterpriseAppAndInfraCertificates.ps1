@@ -149,19 +149,37 @@ if ($currentAzContext -and -not $ClientId -and -not $UseManagedIdentity) {
     Write-Host "[+] Active Azure session detected in Portal / PowerShell: $($currentAzContext.Account.Id)" -ForegroundColor Green
     Write-Host "    Tenant ID: $effectiveTenantId" -ForegroundColor Gray
 
-    try {
-        Write-Host "[AUTH] Acquiring Microsoft Graph token from active Azure Portal session..." -ForegroundColor Gray
-        $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction SilentlyContinue
-        if (-not $tokenObj -or -not $tokenObj.Token) {
-            $tokenObj = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction SilentlyContinue
-        }
-        if ($tokenObj -and $tokenObj.Token) {
-            $graphAccessToken = $tokenObj.Token
-            Write-Host "[+] Successfully acquired Microsoft Graph token silently (Zero Prompts, No Device Auth)." -ForegroundColor Green
+    # In Azure Cloud Shell, Get-AzContext defaults to container identity MSI@50342 which lacks Graph permissions.
+    if ($currentAzContext.Account.Id -like "MSI@*") {
+        Write-Host "[AUTH] Detected Azure Cloud Shell container identity ($($currentAzContext.Account.Id))." -ForegroundColor Yellow
+        Write-Host "[AUTH] Attempting to acquire user Graph token via Azure CLI delegation..." -ForegroundColor Gray
+        if (Get-Command az -ErrorAction SilentlyContinue) {
+            try {
+                $cliToken = az account get-access-token --resource-type ms-graph --query accessToken -o tsv 2>$null
+                if ($cliToken -and $cliToken.Trim().Length -gt 20) {
+                    $graphAccessToken = $cliToken.Trim()
+                    Write-Host "[+] Successfully acquired Microsoft Graph token via Azure CLI in Cloud Shell." -ForegroundColor Green
+                }
+            }
+            catch { }
         }
     }
-    catch {
-        Write-Host "[WARN] Could not get Graph token silently from active session: $($_.Exception.Message)" -ForegroundColor Yellow
+
+    if (-not $graphAccessToken) {
+        try {
+            Write-Host "[AUTH] Acquiring Microsoft Graph token from active Azure Portal session..." -ForegroundColor Gray
+            $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction SilentlyContinue
+            if (-not $tokenObj -or -not $tokenObj.Token) {
+                $tokenObj = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction SilentlyContinue
+            }
+            if ($tokenObj -and $tokenObj.Token) {
+                $graphAccessToken = $tokenObj.Token
+                Write-Host "[+] Successfully acquired Microsoft Graph token silently (Zero Prompts, No Device Auth)." -ForegroundColor Green
+            }
+        }
+        catch {
+            Write-Host "[WARN] Could not get Graph token silently from active session: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -262,7 +280,25 @@ function Invoke-GraphRestApi {
             $nextUri = $resp.'@odata.nextLink'
         }
         catch {
-            Write-Host "[WARN] Graph API query failed on URI '$nextUri': $($_.Exception.Message)" -ForegroundColor Red
+            if ($_.Exception.Message -like "*401*" -or ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 401)) {
+                Write-Host "`n[ERROR] Microsoft Graph API returned 401 (Unauthorized)!" -ForegroundColor Red
+                if ($currentAzContext.Account.Id -like "MSI@*") {
+                    Write-Host ">>> ROOT CAUSE: In Azure Cloud Shell, PowerShell runs under the internal container identity '$($currentAzContext.Account.Id)'." -ForegroundColor Yellow
+                    Write-Host "    This container identity is only for storage mounting and has NO permissions to query Entra ID / Microsoft Graph." -ForegroundColor Yellow
+                    Write-Host "`n>>> SOLUTIONS TO RUN SUCCESSFULLY:" -ForegroundColor Cyan
+                    Write-Host "    1. RUN LOCALLY ON YOUR LAPTOP (Recommended for Local Testing):" -ForegroundColor White
+                    Write-Host "       Open PowerShell on your Windows laptop (C:\Users\home\Downloads\exl) and run:" -ForegroundColor White
+                    Write-Host "         .\Export-EnterpriseAppAndInfraCertificates.ps1" -ForegroundColor Green
+                    Write-Host "       Your local PC will sign in as your real corporate user via standard browser SSO (No device code, No MSI!)." -ForegroundColor Gray
+                    Write-Host "`n    2. OR PASS APP REGISTRATION CREDENTIALS (For Cloud Shell / Automation):" -ForegroundColor White
+                    Write-Host "       Pass your App Registration Client ID and Secret (as configured in script_v2.ps1):" -ForegroundColor White
+                    Write-Host "         .\Export-EnterpriseAppAndInfraCertificates.ps1 -TenantId '$effectiveTenantId' -ClientId '<ClientId>' -ClientSecret '<Secret>'" -ForegroundColor Green
+                } else {
+                    Write-Host "[WARN] Graph API query failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "[WARN] Graph API query failed on URI '$nextUri': $($_.Exception.Message)" -ForegroundColor Red
+            }
             break
         }
     }
