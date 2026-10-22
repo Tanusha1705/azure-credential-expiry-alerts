@@ -36,6 +36,18 @@
 
 .EXAMPLE
     .\Export-StorageAccountSecurityReports.ps1 -OutputPath "C:\Reports" -Format Both
+
+.EXAMPLE
+    # Audit a single Management Group (ac-1.1):
+    .\Export-StorageAccountSecurityReports.ps1 -ManagementGroupId "ac-1.1"
+
+.EXAMPLE
+    # Audit BOTH ac-1.1 and ac-1.2 together in one combined report (CSV + Excel):
+    .\Export-StorageAccountSecurityReports.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -Format Both
+
+.EXAMPLE
+    # Save combined ac-1.1 + ac-1.2 results to a specific folder:
+    .\Export-StorageAccountSecurityReports.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -OutputPath "C:\Reports" -Format Both
 #>
 
 [CmdletBinding()]
@@ -48,7 +60,7 @@ param (
     [string]$Format = 'Csv',
 
     [Parameter(Mandatory = $false)]
-    [string]$ManagementGroupId,
+    [string[]]$ManagementGroupId,
 
     [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds
@@ -94,60 +106,86 @@ if (($Format -in @('Excel', 'Both')) -and -not $hasImportExcel) {
 # -------------------------------------------------------------------------
 # 2. RESOLVE SCOPE & SUBSCRIPTIONS
 # -------------------------------------------------------------------------
-if ($ManagementGroupId) {
-    Write-Host "`n[SCOPE RESOLUTION] Resolving Management Group: '$ManagementGroupId'..." -ForegroundColor Cyan
-    
-    # 1. Look up Management Group by ID or DisplayName
-    $mg = Get-AzManagementGroup -GroupId $ManagementGroupId -Expand -Recurse -ErrorAction SilentlyContinue
-    if (-not $mg) {
-        $allMgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
-        $matched = $allMgs | Where-Object { $_.Name -eq $ManagementGroupId -or $_.DisplayName -eq $ManagementGroupId } | Select-Object -First 1
-        if ($matched) {
-            $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
-        }
-    }
 
-    if (-not $mg) {
-        Throw "Management Group '$ManagementGroupId' was not found in this tenant! Stopped to avoid scanning the entire tenant."
-    }
-
-    Write-Host "[+] Matched Management Group: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
-
-    # 2. Recursively gather all subscription IDs under this Management Group
-    $discoveredSubIds = [System.Collections.Generic.List[string]]::new()
-    function Resolve-MgSubsRecursive($node) {
-        if ($node.Children) {
-            foreach ($c in $node.Children) {
-                if ($c.Type -match 'subscriptions' -and $c.Name) {
-                    $discoveredSubIds.Add($c.Name)
-                }
-                if ($c.Children) {
-                    Resolve-MgSubsRecursive $c
-                }
+# Helper: recursively collect subscription IDs from a resolved MG node
+function Resolve-MgSubsRecursive($node, $collector) {
+    if ($node.Children) {
+        foreach ($c in $node.Children) {
+            if ($c.Type -match 'subscriptions' -and $c.Name) {
+                $collector.Add($c.Name)
+            }
+            if ($c.Children) {
+                Resolve-MgSubsRecursive $c $collector
             }
         }
     }
-    Resolve-MgSubsRecursive $mg
+}
 
-    if ($discoveredSubIds.Count -eq 0) {
-        $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
-        if ($mgSubs) {
-            foreach ($s in $mgSubs) {
-                $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
-                if ($sid) { $discoveredSubIds.Add($sid) }
+if ($ManagementGroupId -and $ManagementGroupId.Count -gt 0) {
+
+    Write-Host "`n[SCOPE RESOLUTION] Resolving $($ManagementGroupId.Count) Management Group(s)..." -ForegroundColor Cyan
+
+    # Cache all MGs once (used for display-name lookups) to avoid repeated API calls
+    $allMgsCache = $null
+
+    # Collect all subscription IDs across every supplied MG
+    $allDiscoveredSubIds = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($mgInput in $ManagementGroupId) {
+
+        Write-Host "`n  [MG] Resolving: '$mgInput'" -ForegroundColor Yellow
+
+        # 1. Lookup by ID directly, then fall back to display-name match
+        $mg = Get-AzManagementGroup -GroupId $mgInput -Expand -Recurse -ErrorAction SilentlyContinue
+        if (-not $mg) {
+            if (-not $allMgsCache) {
+                $allMgsCache = Get-AzManagementGroup -ErrorAction SilentlyContinue
+            }
+            $matched = $allMgsCache | Where-Object { $_.Name -eq $mgInput -or $_.DisplayName -eq $mgInput } | Select-Object -First 1
+            if ($matched) {
+                $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
             }
         }
+
+        if (-not $mg) {
+            Write-Host "  [WARN] Management Group '$mgInput' was NOT found — skipping." -ForegroundColor Red
+            continue
+        }
+
+        Write-Host "  [+] Matched: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
+
+        # 2. Recursively gather subscriptions under this MG
+        $mgSubIds = [System.Collections.Generic.List[string]]::new()
+        Resolve-MgSubsRecursive $mg $mgSubIds
+
+        # Fallback: use Get-AzManagementGroupSubscription if tree walk returned nothing
+        if ($mgSubIds.Count -eq 0) {
+            $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
+            if ($mgSubs) {
+                foreach ($s in $mgSubs) {
+                    $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
+                    if ($sid) { $mgSubIds.Add($sid) }
+                }
+            }
+        }
+
+        Write-Host "  [+] Found $($mgSubIds.Count) subscription(s) under '$($mg.DisplayName)':" -ForegroundColor Green
+        $mgSubIds | ForEach-Object { Write-Host "      -> $_" -ForegroundColor DarkGray }
+
+        # Merge into the combined pool
+        foreach ($sid in $mgSubIds) { $allDiscoveredSubIds.Add($sid) }
     }
 
-    $uniqueSubIds = @($discoveredSubIds | Select-Object -Unique)
+    # 3. Deduplicate — a subscription could exist under both MGs (e.g. nested hierarchy)
+    $uniqueSubIds = @($allDiscoveredSubIds | Select-Object -Unique)
+
     if ($uniqueSubIds.Count -eq 0) {
-        Throw "No subscriptions found under Management Group '$($mg.DisplayName)'! Stopped to avoid scanning unintended subscriptions."
+        Throw "No subscriptions found across any of the supplied Management Groups! Stopped to avoid scanning the entire tenant."
     }
 
-    Write-Host "[+] Found $($uniqueSubIds.Count) subscription(s) strictly under '$($mg.DisplayName)':" -ForegroundColor Green
-    $uniqueSubIds | ForEach-Object { Write-Host "    -> Subscription ID: $_" -ForegroundColor DarkGray }
+    Write-Host "`n[+] Combined unique subscription(s) across all $($ManagementGroupId.Count) Management Group(s): $($uniqueSubIds.Count)" -ForegroundColor Cyan
 
-    # Lock down target subscriptions strictly to this Management Group
+    # Lock down target subscriptions to the combined MG scope
     $SubscriptionIds = $uniqueSubIds
 }
 
@@ -183,6 +221,7 @@ $kqlSubFilter
 ) on subscriptionId
 | project
     storageaccountname              = name,
+    resourcegroup                   = resourceGroup,
     encryptionkeysource             = tostring(coalesce(properties.encryption.keySource, 'Microsoft.Storage')),
     infrastructureencryptionenabled = tostring(coalesce(properties.encryption.requireInfrastructureEncryption, false)),
     networkacldefaultaction         = tostring(coalesce(properties.networkAcls.defaultAction, 'Allow')),
@@ -206,6 +245,7 @@ $kqlSubFilter
             # Report 1: Consolidated Object
             $consolidatedList.Add([PSCustomObject]@{
                 storageaccountname              = $row.storageaccountname
+                resourcegroup                   = $row.resourcegroup
                 encryptionkeysource             = $row.encryptionkeysource
                 infrastructureencryptionenabled = $row.infrastructureencryptionenabled
                 networkacldefaultaction         = $row.networkacldefaultaction
@@ -216,6 +256,7 @@ $kqlSubFilter
             # Report 2 Detailed: Per Storage Account BPA
             $bpaDetailedList.Add([PSCustomObject]@{
                 storageaccountname              = $row.storageaccountname
+                resourcegroup                   = $row.resourcegroup
                 subscriptionname                = $row.subscriptionname
                 subscriptionid                  = $row.subscriptionid
                 allowblobpublicaccess           = $row.allowblobpublicaccess
@@ -277,6 +318,7 @@ if (-not $hasArg) {
             # Consolidated Report Item
             $consolidatedList.Add([PSCustomObject]@{
                 storageaccountname              = $sa.StorageAccountName
+                resourcegroup                   = $sa.ResourceGroupName
                 encryptionkeysource             = $keySource
                 infrastructureencryptionenabled = $infraEnc
                 networkacldefaultaction         = $netAction
@@ -287,6 +329,7 @@ if (-not $hasArg) {
             # BPA Detailed Report Item
             $bpaDetailedList.Add([PSCustomObject]@{
                 storageaccountname              = $sa.StorageAccountName
+                resourcegroup                   = $sa.ResourceGroupName
                 subscriptionname                = $sub.Name
                 subscriptionid                  = $sub.Id
                 allowblobpublicaccess           = $bpa
@@ -325,7 +368,7 @@ if ($Format -in @('Csv', 'Both')) {
     # Report 1
     $consolidatedList | Export-Csv -Path $file1Csv -NoTypeInformation -Encoding utf8
     Write-Host "[+] Generated: $file1Csv" -ForegroundColor Green
-    Write-Host "    Columns: storageaccountname | encryptionkeysource | infrastructureencryptionenabled | networkacldefaultaction | subscriptionname | subscriptionid" -ForegroundColor DarkGray
+    Write-Host "    Columns: storageaccountname | resourcegroup | encryptionkeysource | infrastructureencryptionenabled | networkacldefaultaction | subscriptionname | subscriptionid" -ForegroundColor DarkGray
 
     # Report 2 (Subscription Summary matching AWS BPA)
     $bpaList | Export-Csv -Path $file2Csv -NoTypeInformation -Encoding utf8
@@ -335,7 +378,7 @@ if ($Format -in @('Csv', 'Both')) {
     # Report 2 Detailed (Per-account granular BPA)
     $bpaDetailedList | Export-Csv -Path $file2DetailedCsv -NoTypeInformation -Encoding utf8
     Write-Host "[+] Generated: $file2DetailedCsv" -ForegroundColor Green
-    Write-Host "    Columns: storageaccountname | subscriptionname | subscriptionid | allowblobpublicaccess" -ForegroundColor DarkGray
+    Write-Host "    Columns: storageaccountname | resourcegroup | subscriptionname | subscriptionid | allowblobpublicaccess" -ForegroundColor DarkGray
 }
 
 # Export to Excel (if requested and ImportExcel is installed)
