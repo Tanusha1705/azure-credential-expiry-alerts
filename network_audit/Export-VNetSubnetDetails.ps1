@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Exports all Azure Virtual Network (VNet) Subnet details for a specific Management Group.
+    Exports all Azure Virtual Network (VNet) Subnet details for one or more Management Groups.
     
 .DESCRIPTION
-    Discovers all subscriptions under a specified Management Group (default: 'ac-1.1')
-    and extracts comprehensive VNet and Subnet configuration data matching 14 exact attributes:
+    Discovers all subscriptions under the specified Management Group(s) and extracts
+    comprehensive VNet and Subnet configuration data matching 14 exact attributes:
       1.  SubnetName
       2.  Region
       3.  ZoneRedundancyScope
@@ -20,8 +20,12 @@
       13. SubscriptionName
       14. ResourceGroupName
 
+    Multiple Management Groups are supported. Subscriptions that exist under more than
+    one MG are automatically deduplicated so they are only queried once.
+
 .PARAMETER ManagementGroupId
-    Target Azure Management Group ID or Display Name. Default is 'ac-1.1'.
+    One or more Management Group IDs or Display Names to audit.
+    Accepts an array: -ManagementGroupId "ac-1.1","ac-1.2"
 
 .PARAMETER OutputPath
     Directory where reports will be saved. Default is the script directory.
@@ -30,16 +34,22 @@
     Output format: 'Csv' (default), 'Excel', or 'Both'.
 
 .EXAMPLE
-    .\Export-VNetSubnetDetails.ps1
+    # Single Management Group:
+    .\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1"
 
 .EXAMPLE
-    .\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1" -Format Both
+    # Both ac-1.1 and ac-1.2 combined into one report:
+    .\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -Format Both
+
+.EXAMPLE
+    # Save combined results to a specific folder:
+    .\Export-VNetSubnetDetails.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -OutputPath "C:\Reports" -Format Both
 #>
 
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [string]$ManagementGroupId = "ac-1.1",
+    [string[]]$ManagementGroupId = @("ac-1.1", "ac-1.2"),
 
     [Parameter(Mandatory = $false)]
     [string]$OutputPath = $PSScriptRoot,
@@ -54,7 +64,7 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host " Azure VNet Subnet Details Extraction" -ForegroundColor Cyan
-Write-Host " Target Scope : Management Group '$ManagementGroupId'" -ForegroundColor Yellow
+Write-Host " Target Scope : $($ManagementGroupId.Count) Management Group(s): $($ManagementGroupId -join ', ')" -ForegroundColor Yellow
 Write-Host " Attributes   : 14 Detailed Subnet, VNet, & IP Inventory Fields" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
@@ -89,57 +99,72 @@ if (($Format -in @('Excel', 'Both')) -and -not $hasImportExcel) {
 }
 
 # -------------------------------------------------------------------------
-# 2. RESOLVE SUBSCRIPTIONS UNDER MANAGEMENT GROUP STRICTLY
+# 2. RESOLVE SUBSCRIPTIONS ACROSS ALL SUPPLIED MANAGEMENT GROUPS
 # -------------------------------------------------------------------------
-Write-Host "`n[STEP 1/3] Resolving Management Group '$ManagementGroupId'..." -ForegroundColor Cyan
+Write-Host "`n[STEP 1/3] Resolving $($ManagementGroupId.Count) Management Group(s)..." -ForegroundColor Cyan
 
-$mg = Get-AzManagementGroup -GroupId $ManagementGroupId -Expand -Recurse -ErrorAction SilentlyContinue
-if (-not $mg) {
-    $allMgs = Get-AzManagementGroup -ErrorAction SilentlyContinue
-    $matched = $allMgs | Where-Object { $_.Name -eq $ManagementGroupId -or $_.DisplayName -eq $ManagementGroupId } | Select-Object -First 1
-    if ($matched) {
-        $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
-    }
-}
-
-if (-not $mg) {
-    Throw "[ERROR] Management Group '$ManagementGroupId' was not found in this tenant! Stopped to avoid full-tenant scanning."
-}
-
-Write-Host "[+] Matched Management Group: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
-
-$discoveredSubIds = [System.Collections.Generic.List[string]]::new()
-function Find-MgSubsRecursive($node) {
+# Helper: recursively collect subscription IDs from a resolved MG node
+function Find-MgSubsRecursive($node, $collector) {
     if ($node.Children) {
         foreach ($c in $node.Children) {
             if ($c.Type -match 'subscriptions' -and $c.Name) {
-                $discoveredSubIds.Add($c.Name)
+                $collector.Add($c.Name)
             }
             if ($c.Children) {
-                Find-MgSubsRecursive $c
+                Find-MgSubsRecursive $c $collector
             }
         }
     }
 }
-Find-MgSubsRecursive $mg
 
-if ($discoveredSubIds.Count -eq 0) {
-    $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
-    if ($mgSubs) {
-        foreach ($s in $mgSubs) {
-            $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
-            if ($sid) { $discoveredSubIds.Add($sid) }
+$allMgsCache        = $null
+$allDiscoveredSubIds = [System.Collections.Generic.List[string]]::new()
+
+foreach ($mgInput in $ManagementGroupId) {
+
+    Write-Host "`n  [MG] Resolving: '$mgInput'" -ForegroundColor Yellow
+
+    $mg = Get-AzManagementGroup -GroupId $mgInput -Expand -Recurse -ErrorAction SilentlyContinue
+    if (-not $mg) {
+        if (-not $allMgsCache) { $allMgsCache = Get-AzManagementGroup -ErrorAction SilentlyContinue }
+        $matched = $allMgsCache | Where-Object { $_.Name -eq $mgInput -or $_.DisplayName -eq $mgInput } | Select-Object -First 1
+        if ($matched) {
+            $mg = Get-AzManagementGroup -GroupId $matched.Name -Expand -Recurse -ErrorAction SilentlyContinue
         }
     }
+
+    if (-not $mg) {
+        Write-Host "  [WARN] Management Group '$mgInput' was NOT found — skipping." -ForegroundColor Red
+        continue
+    }
+
+    Write-Host "  [+] Matched: $($mg.DisplayName) (ID: $($mg.Name))" -ForegroundColor Green
+
+    $mgSubIds = [System.Collections.Generic.List[string]]::new()
+    Find-MgSubsRecursive $mg $mgSubIds
+
+    if ($mgSubIds.Count -eq 0) {
+        $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
+        if ($mgSubs) {
+            foreach ($s in $mgSubs) {
+                $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
+                if ($sid) { $mgSubIds.Add($sid) }
+            }
+        }
+    }
+
+    Write-Host "  [+] Found $($mgSubIds.Count) subscription(s) under '$($mg.DisplayName)':" -ForegroundColor Green
+    $mgSubIds | ForEach-Object { Write-Host "      -> $_" -ForegroundColor DarkGray }
+
+    foreach ($sid in $mgSubIds) { $allDiscoveredSubIds.Add($sid) }
 }
 
-$targetSubs = @($discoveredSubIds | Select-Object -Unique)
+$targetSubs = @($allDiscoveredSubIds | Select-Object -Unique)
 if ($targetSubs.Count -eq 0) {
-    Throw "[ERROR] No subscriptions found under Management Group '$ManagementGroupId'. Stopped."
+    Throw "[ERROR] No subscriptions found across any of the supplied Management Groups. Stopped."
 }
 
-Write-Host "[+] Discovered $($targetSubs.Count) subscription(s) strictly under '$ManagementGroupId':" -ForegroundColor Green
-$targetSubs | ForEach-Object { Write-Host "    -> Subscription ID: $_" -ForegroundColor DarkGray }
+Write-Host "`n[+] Combined unique subscription(s) across all $($ManagementGroupId.Count) Management Group(s): $($targetSubs.Count)" -ForegroundColor Cyan
 
 $formattedKqlSubFilter = ($targetSubs | ForEach-Object { "'$_'" }) -join ", "
 
@@ -273,7 +298,8 @@ if (-not $hasArg) {
 # -------------------------------------------------------------------------
 Write-Host "`n[STEP 3/3] Exporting Subnet Inventory..." -ForegroundColor Cyan
 
-$fileBase = Join-Path $OutputPath "VNet-Subnet-Details-$ManagementGroupId"
+$mgLabel = ($ManagementGroupId -join "_and_")
+$fileBase = Join-Path $OutputPath "VNet-Subnet-Details-$mgLabel"
 
 if ($Format -in @('Csv', 'Both')) {
     $csvPath = "$fileBase.csv"
@@ -296,10 +322,10 @@ if ($Format -in @('Excel', 'Both') -and $hasImportExcel) {
 
 Write-Host "`n========================================================" -ForegroundColor Green
 Write-Host " EXTRACTION COMPLETE" -ForegroundColor Green
-Write-Host " Management Group : '$ManagementGroupId'"
-Write-Host " Subscriptions    : $($targetSubs.Count)"
-Write-Host " Total Subnets    : $($subnetRecords.Count)"
-Write-Host " Output Directory : $OutputPath"
+Write-Host " Management Groups : $($ManagementGroupId -join ', ')"
+Write-Host " Subscriptions     : $($targetSubs.Count)"
+Write-Host " Total Subnets     : $($subnetRecords.Count)"
+Write-Host " Output Directory  : $OutputPath"
 Write-Host "========================================================" -ForegroundColor Green
 
 if ($subnetRecords.Count -gt 0) {
