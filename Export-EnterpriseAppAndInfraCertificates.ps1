@@ -263,6 +263,39 @@ function Invoke-GraphRestApi {
 
     $results = [System.Collections.Generic.List[object]]::new()
     $nextUri = $Uri
+
+    # In Azure Cloud Shell (or whenever Az context is MSI@*), try az rest which uses pre-consented Azure CLI session
+    $isCloudShellMsi = ($null -eq $AccessToken -or ($currentAzContext -and $currentAzContext.Account.Id -like "MSI@*"))
+    if ($isCloudShellMsi -and (Get-Command az -ErrorAction SilentlyContinue)) {
+        Write-Host "  [AUTH] Querying Microsoft Graph via Azure CLI (az rest) in Cloud Shell..." -ForegroundColor Gray
+        while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
+            try {
+                $rawJson = az rest --method GET --uri "$nextUri" --output json 2>&1
+                if ($LASTEXITCODE -eq 0 -and $rawJson) {
+                    $jsonText = ($rawJson -join "`n").Trim()
+                    $resp = $jsonText | ConvertFrom-Json
+                    if ($resp.value) {
+                        foreach ($item in $resp.value) { $results.Add($item) }
+                    } else {
+                        $results.Add($resp)
+                    }
+                    $nextUri = $resp.'@odata.nextLink'
+                }
+                else {
+                    Write-Host "  [INFO] az rest did not return data; falling back to direct REST token call." -ForegroundColor DarkGray
+                    break
+                }
+            }
+            catch {
+                break
+            }
+        }
+
+        if ($results.Count -gt 0) {
+            return $results
+        }
+    }
+
     $headers = @{
         "Authorization"    = "Bearer $AccessToken"
         "ConsistencyLevel" = "eventual"
