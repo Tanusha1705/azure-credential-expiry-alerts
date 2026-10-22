@@ -135,16 +135,38 @@ Write-Host "====================================================================
 $graphAccessToken = $null
 $effectiveTenantId = $TenantId
 
-# Detect Azure Automation environment
-$isAzureAutomation = ($UseManagedIdentity -or `
-    $env:AZUREPS_HOST_ENVIRONMENT -like "*Automation*" -or `
-    (Get-Command Get-AutomationVariable -ErrorAction SilentlyContinue) -or `
-    $env:IDENTITY_HEADER)
+# Check if there is already an active Azure context (e.g. Azure Portal Cloud Shell or logged-in local PowerShell)
+$currentAzContext = Get-AzContext -ErrorAction SilentlyContinue
+
+# Detect Azure Automation environment (explicit switch or actual automation sandbox)
+$isAzureAutomation = ($UseManagedIdentity -or ($env:AZUREPS_HOST_ENVIRONMENT -like "*AzureAutomation*") -or (Get-Command Get-AutomationVariable -ErrorAction SilentlyContinue))
 
 Write-Host "`n[AUTH] Initializing authentication (Device Code Auth is DISABLED)..." -ForegroundColor Cyan
 
-# Mode A: Service Principal (ClientId + ClientSecret)
-if (-not [string]::IsNullOrWhiteSpace($ClientId) -and -not [string]::IsNullOrWhiteSpace($ClientSecret)) {
+# Mode 1: Active Azure Session Detected (Azure Portal Cloud Shell or Local PowerShell)
+if ($currentAzContext -and -not $ClientId -and -not $UseManagedIdentity) {
+    $effectiveTenantId = $currentAzContext.Tenant.Id
+    Write-Host "[+] Active Azure session detected in Portal / PowerShell: $($currentAzContext.Account.Id)" -ForegroundColor Green
+    Write-Host "    Tenant ID: $effectiveTenantId" -ForegroundColor Gray
+
+    try {
+        Write-Host "[AUTH] Acquiring Microsoft Graph token from active Azure Portal session..." -ForegroundColor Gray
+        $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction SilentlyContinue
+        if (-not $tokenObj -or -not $tokenObj.Token) {
+            $tokenObj = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction SilentlyContinue
+        }
+        if ($tokenObj -and $tokenObj.Token) {
+            $graphAccessToken = $tokenObj.Token
+            Write-Host "[+] Successfully acquired Microsoft Graph token silently (Zero Prompts, No Device Auth)." -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "[WARN] Could not get Graph token silently from active session: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# Mode 2: Service Principal (ClientId + ClientSecret)
+if (-not $graphAccessToken -and -not [string]::IsNullOrWhiteSpace($ClientId) -and -not [string]::IsNullOrWhiteSpace($ClientSecret)) {
     if ([string]::IsNullOrWhiteSpace($effectiveTenantId)) {
         Throw "[ERROR] -TenantId is required when authenticating with ClientId and ClientSecret."
     }
@@ -167,8 +189,8 @@ if (-not [string]::IsNullOrWhiteSpace($ClientId) -and -not [string]::IsNullOrWhi
         Throw "[ERROR] Failed to obtain access token with ClientSecret: $($_.Exception.Message)"
     }
 }
-# Mode B: Azure Automation Managed Identity
-elseif ($isAzureAutomation) {
+# Mode 3: Azure Automation Managed Identity
+elseif (-not $graphAccessToken -and $isAzureAutomation) {
     Write-Host "[AUTH] Detected Azure Automation environment. Connecting via Managed Identity..." -ForegroundColor Yellow
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue
@@ -186,47 +208,21 @@ elseif ($isAzureAutomation) {
         Throw "[ERROR] Managed Identity authentication failed: $($_.Exception.Message)"
     }
 }
-# Mode C: Local Interactive / Reusing Active Az Context
-else {
-    # Check if user already has an active Azure context
-    $currentAzContext = Get-AzContext -ErrorAction SilentlyContinue
-    if (-not $currentAzContext) {
-        Write-Host "[AUTH] No active Azure session found. Launching standard interactive browser sign-in..." -ForegroundColor Yellow
-        Write-Host "[INFO] A web browser window will open. Complete your standard corporate SSO sign-in." -ForegroundColor Gray
-        
-        $connectParams = @{ ErrorAction = 'Stop' }
-        if (-not [string]::IsNullOrWhiteSpace($effectiveTenantId)) {
-            $connectParams["TenantId"] = $effectiveTenantId
-        }
-        $null = Connect-AzAccount @connectParams
-        $currentAzContext = Get-AzContext
+# Mode 4: Local Interactive Browser Login (Only if no active session found)
+elseif (-not $graphAccessToken) {
+    Write-Host "[AUTH] No active session found. Launching standard interactive browser sign-in..." -ForegroundColor Yellow
+    $connectParams = @{ ErrorAction = 'Stop' }
+    if (-not [string]::IsNullOrWhiteSpace($effectiveTenantId)) {
+        $connectParams["TenantId"] = $effectiveTenantId
     }
-
+    $null = Connect-AzAccount @connectParams
+    $currentAzContext = Get-AzContext
     $effectiveTenantId = $currentAzContext.Tenant.Id
     Write-Host "[+] Using active Azure session: $($currentAzContext.Account.Id) (Tenant: $effectiveTenantId)" -ForegroundColor Green
 
-    # Acquire Graph Token from active Az session without prompting!
-    try {
-        Write-Host "[AUTH] Acquiring Microsoft Graph token from active Az session..." -ForegroundColor Gray
-        $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction SilentlyContinue
-        if (-not $tokenObj -or -not $tokenObj.Token) {
-            $tokenObj = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop
-        }
-        $graphAccessToken = $tokenObj.Token
-        Write-Host "[+] Successfully acquired Microsoft Graph token from active Az context." -ForegroundColor Green
-    }
-    catch {
-        Write-Host "[WARN] Could not acquire Graph token from Az context. Checking Microsoft.Graph module..." -ForegroundColor Yellow
-        if (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue) {
-            Write-Host "[AUTH] Connecting to Microsoft Graph interactively (browser popup)..." -ForegroundColor Cyan
-            Connect-MgGraph -Scopes "Application.Read.All", "User.Read.All" -NoWelcome -ErrorAction Stop
-            $mgContext = Get-MgContext
-            Write-Host "[+] Connected to Microsoft Graph via Connect-MgGraph." -ForegroundColor Green
-        }
-        else {
-            Throw "[ERROR] Could not acquire Graph access token: $($_.Exception.Message)"
-        }
-    }
+    $tokenObj = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com" -ErrorAction Stop
+    $graphAccessToken = $tokenObj.Token
+    Write-Host "[+] Successfully acquired Microsoft Graph token from browser login." -ForegroundColor Green
 }
 
 # Connect Microsoft.Graph session if module is loaded and token is available
