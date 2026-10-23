@@ -438,7 +438,8 @@ if ($allResults.Count -gt 0) {
     # ---------------------------------------------------------------------------
     if ([string]::IsNullOrWhiteSpace($CsvPath)) {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $CsvPath   = Join-Path $PSScriptRoot "AppGw-WebApp-CertExpiry-$timestamp.csv"
+        $baseDir   = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+        $CsvPath   = Join-Path $baseDir "AppGw-WebApp-CertExpiry-$timestamp.csv"
     }
 
     $allResults |
