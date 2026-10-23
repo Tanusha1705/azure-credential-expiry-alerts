@@ -3,8 +3,8 @@
     Exports Azure Virtual Network (VNet) inventory details for one or more Management Groups.
 
 .DESCRIPTION
-    Discovers all subscriptions under the specified Management Group(s) and extracts VNet
-    configurations matching 9 exact attributes:
+    Discovers all subscriptions under the specified Management Group(s) (including deeply nested
+    child Management Groups) and extracts VNet configurations matching 9 exact attributes:
       1. vnetname
       2. vnetid
       3. addressspace
@@ -15,12 +15,21 @@
       8. subscriptionid
       9. subscriptionname
 
-    Multiple Management Groups are supported. Subscriptions that exist under more than
-    one MG are automatically deduplicated so they are only queried once.
+    MULTIPLE MANAGEMENT GROUPS SUPPORT:
+      - Accepts multiple Management Groups as an array (-ManagementGroupId "ac-1.1","ac-1.2")
+        or as a comma-separated string (-ManagementGroupId "ac-1.1,ac-1.2,ac-1.3").
+      - Subscriptions that exist under more than one MG or nested levels are automatically
+        deduplicated so they are only queried once.
+      - Uses Azure Resource Graph (ARG) for high-speed batch querying across all discovered
+        subscriptions, with automatic fallback to Get-AzVirtualNetwork.
+      - Generates safe, sanitized report filenames even when many MGs are specified.
 
 .PARAMETER ManagementGroupId
     One or more Management Group IDs or Display Names to audit.
-    Accepts an array: -ManagementGroupId "ac-1.1","ac-1.2"
+    Accepts:
+      - Array: -ManagementGroupId "ac-1.1","ac-1.2"
+      - Comma-delimited: -ManagementGroupId "ac-1.1,ac-1.2,ac-1.3"
+    Default is @("ac-1.1", "ac-1.2").
 
 .PARAMETER OutputPath
     Directory where reports will be saved. Default is the current script directory.
@@ -33,12 +42,16 @@
     .\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "ac-1.1"
 
 .EXAMPLE
-    # Both ac-1.1 and ac-1.2 combined into one report:
-    .\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -Format Both
+    # Multiple Management Groups as an array:
+    .\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "ac-1.1","ac-1.2","ac-1.3" -Format Both
 
 .EXAMPLE
-    # Save combined results to a specific folder:
-    .\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "ac-1.1","ac-1.2" -OutputPath "C:\Reports" -Format Both
+    # Multiple Management Groups as comma-separated string:
+    .\Export-VNetInventory-ac-1.1.ps1 -ManagementGroupId "ac-1.1,ac-1.2,ac-1.3"
+
+.EXAMPLE
+    # Default (runs with both ac-1.1 and ac-1.2):
+    .\Export-VNetInventory-ac-1.1.ps1
 #>
 
 [CmdletBinding()]
@@ -50,10 +63,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "One or more Management Group IDs or Display Names. E.g.: -ManagementGroupId 'ac-1.1','ac-1.2'")]
     [string[]]$ManagementGroupId = @("ac-1.1", "ac-1.2"),
 
-    [Parameter(Mandatory = $false)]
-    [string]$OutputPath = $PSScriptRoot,
+    [Parameter(Mandatory = $false, HelpMessage = "Directory where reports will be saved")]
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $false, HelpMessage = "Export format: Csv (default), Excel, or Both")]
     [ValidateSet('Csv', 'Excel', 'Both')]
     [string]$Format = 'Csv'
 )
@@ -61,9 +74,35 @@ param (
 Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
 
+# -------------------------------------------------------------------------
+# NORMALIZE MANAGEMENT GROUP INPUT (Supports arrays, comma-delimited strings)
+# -------------------------------------------------------------------------
+$normalizedMgList = [System.Collections.Generic.List[string]]::new()
+foreach ($item in $ManagementGroupId) {
+    if ([string]::IsNullOrWhiteSpace($item)) { continue }
+    if ($item -match ',') {
+        foreach ($subItem in ($item -split ',')) {
+            $clean = $subItem.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($clean) -and -not $normalizedMgList.Contains($clean)) {
+                $normalizedMgList.Add($clean)
+            }
+        }
+    }
+    else {
+        $clean = $item.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($clean) -and -not $normalizedMgList.Contains($clean)) {
+            $normalizedMgList.Add($clean)
+        }
+    }
+}
+
+if ($normalizedMgList.Count -eq 0) {
+    Throw "[ERROR] No valid Management Group IDs provided."
+}
+
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host " Azure Virtual Network (VNet) Inventory Extraction" -ForegroundColor Cyan
-Write-Host " Target Scope : $($ManagementGroupId.Count) Management Group(s): $($ManagementGroupId -join ', ')" -ForegroundColor Yellow
+Write-Host " Target Scope : $($normalizedMgList.Count) Management Group(s): $($normalizedMgList -join ', ')" -ForegroundColor Yellow
 Write-Host " Attributes   : vnetname | vnetid | addressspace | provisioningstate" -ForegroundColor Cyan
 Write-Host "                dnsservers | isdefault | azureregion | subscriptionid | subscriptionname" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -86,11 +125,12 @@ Write-Host "[+] Connected as : $($currentContext.Account.Id)" -ForegroundColor G
 Write-Host "[+] Tenant ID    : $($currentContext.Tenant.Id)" -ForegroundColor Green
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = "."
+    $OutputPath = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 }
 if (-not (Test-Path -Path $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 }
+$fullOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 
 $hasImportExcel = [bool](Get-Module -ListAvailable -Name ImportExcel)
 if (($Format -in @('Excel', 'Both')) -and -not $hasImportExcel) {
@@ -101,17 +141,37 @@ if (($Format -in @('Excel', 'Both')) -and -not $hasImportExcel) {
 # -------------------------------------------------------------------------
 # 2. RESOLVE SUBSCRIPTIONS ACROSS ALL SUPPLIED MANAGEMENT GROUPS
 # -------------------------------------------------------------------------
-Write-Host "`n[STEP 1/3] Resolving $($ManagementGroupId.Count) Management Group(s)..." -ForegroundColor Cyan
+Write-Host "`n[STEP 1/3] Resolving $($normalizedMgList.Count) Management Group(s)..." -ForegroundColor Cyan
 
-# Helper: recursively collect subscription IDs from a resolved MG node
+# Helper: recursively collect subscription IDs from a resolved MG node (handles nested child MGs)
 function Find-MgSubsRecursive($node, $collector) {
     if ($node.Children) {
         foreach ($c in $node.Children) {
+            # Direct subscription child
             if ($c.Type -match 'subscriptions' -and $c.Name) {
-                $collector.Add($c.Name)
+                if (-not $collector.Contains($c.Name)) {
+                    $collector.Add($c.Name)
+                }
             }
-            if ($c.Children) {
+            # Child Management Group with expanded children
+            elseif ($c.Children) {
                 Find-MgSubsRecursive $c $collector
+            }
+            # Child Management Group whose children were not expanded by REST API
+            elseif ($c.Type -match 'managementGroups' -and $c.Name) {
+                $childMg = Get-AzManagementGroup -GroupId $c.Name -Expand -Recurse -ErrorAction SilentlyContinue
+                if ($childMg) {
+                    Find-MgSubsRecursive $childMg $collector
+                }
+                else {
+                    $childSubs = Get-AzManagementGroupSubscription -GroupName $c.Name -ErrorAction SilentlyContinue
+                    if ($childSubs) {
+                        foreach ($cs in $childSubs) {
+                            $csId = if ($cs.SubscriptionId) { $cs.SubscriptionId } elseif ($cs.Name) { $cs.Name } else { $cs.Id }
+                            if ($csId -and -not $collector.Contains($csId)) { $collector.Add($csId) }
+                        }
+                    }
+                }
             }
         }
     }
@@ -119,8 +179,9 @@ function Find-MgSubsRecursive($node, $collector) {
 
 $allMgsCache         = $null
 $allDiscoveredSubIds = [System.Collections.Generic.List[string]]::new()
+$mgSummaryMap        = [System.Collections.Generic.Dictionary[string, int]]::new()
 
-foreach ($mgInput in $ManagementGroupId) {
+foreach ($mgInput in $normalizedMgList) {
 
     Write-Host "`n  [MG] Resolving: '$mgInput'" -ForegroundColor Yellow
 
@@ -134,7 +195,7 @@ foreach ($mgInput in $ManagementGroupId) {
     }
 
     if (-not $mg) {
-        Write-Host "  [WARN] Management Group '$mgInput' was NOT found — skipping." -ForegroundColor Red
+        Write-Host "  [WARN] Management Group '$mgInput' was NOT found - skipping." -ForegroundColor Red
         continue
     }
 
@@ -143,12 +204,13 @@ foreach ($mgInput in $ManagementGroupId) {
     $mgSubIds = [System.Collections.Generic.List[string]]::new()
     Find-MgSubsRecursive $mg $mgSubIds
 
-    if ($mgSubIds.Count -eq 0) {
-        $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
-        if ($mgSubs) {
-            foreach ($s in $mgSubs) {
-                $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
-                if ($sid) { $mgSubIds.Add($sid) }
+    # Fallback / Direct check: Get-AzManagementGroupSubscription
+    $mgSubs = Get-AzManagementGroupSubscription -GroupName $mg.Name -ErrorAction SilentlyContinue
+    if ($mgSubs) {
+        foreach ($s in $mgSubs) {
+            $sid = if ($s.SubscriptionId) { $s.SubscriptionId } elseif ($s.Name) { $s.Name } else { $s.Id }
+            if ($sid -and -not $mgSubIds.Contains($sid)) {
+                $mgSubIds.Add($sid)
             }
         }
     }
@@ -156,7 +218,12 @@ foreach ($mgInput in $ManagementGroupId) {
     Write-Host "  [+] Found $($mgSubIds.Count) subscription(s) under '$($mg.DisplayName)':" -ForegroundColor Green
     $mgSubIds | ForEach-Object { Write-Host "      -> $_" -ForegroundColor DarkGray }
 
-    foreach ($sid in $mgSubIds) { $allDiscoveredSubIds.Add($sid) }
+    $mgSummaryMap[$mg.DisplayName] = $mgSubIds.Count
+    foreach ($sid in $mgSubIds) {
+        if (-not $allDiscoveredSubIds.Contains($sid)) {
+            $allDiscoveredSubIds.Add($sid)
+        }
+    }
 }
 
 $targetSubs = @($allDiscoveredSubIds | Select-Object -Unique)
@@ -164,9 +231,10 @@ if ($targetSubs.Count -eq 0) {
     Throw "[ERROR] No subscriptions found across any of the supplied Management Groups. Stopped."
 }
 
-Write-Host "`n[+] Combined unique subscription(s) across all $($ManagementGroupId.Count) Management Group(s): $($targetSubs.Count)" -ForegroundColor Cyan
-
-$formattedKqlSubFilter = ($targetSubs | ForEach-Object { "'$_'" }) -join ", "
+Write-Host "`n[+] Combined unique subscription(s) across all $($normalizedMgList.Count) Management Group(s): $($targetSubs.Count)" -ForegroundColor Cyan
+foreach ($kv in $mgSummaryMap.GetEnumerator()) {
+    Write-Host "    * $($kv.Key): $($kv.Value) subscription(s)" -ForegroundColor DarkGray
+}
 
 # -------------------------------------------------------------------------
 # 3. EXTRACT VNET INVENTORY DATA
@@ -175,51 +243,62 @@ $vnetRecords = [System.Collections.Generic.List[PSCustomObject]]::new()
 $hasArg = [bool](Get-Module -ListAvailable -Name Az.ResourceGraph)
 
 if ($hasArg) {
-    Write-Host "`n[STEP 2/3] Extracting VNets via Azure Resource Graph (High-Speed)..." -ForegroundColor Cyan
+    Write-Host "`n[STEP 2/3] Extracting VNets via Azure Resource Graph (High-Speed Batch)..." -ForegroundColor Cyan
     try {
-        $kqlQuery = @"
-resources
-| where type =~ 'microsoft.network/virtualnetworks'
-| where subscriptionId in ($formattedKqlSubFilter)
-| join kind=leftouter (
-    resourcecontainers
-    | where type =~ 'microsoft.resources/subscriptions'
-    | project subscriptionId, subscriptionName = name
-) on subscriptionId
-| project
-    vnetname          = name,
-    vnetid            = id,
-    addressspace      = strcat_array(properties.addressSpace.addressPrefixes, ', '),
-    provisioningstate = tostring(properties.provisioningState),
-    dnsservers        = iff(isnotempty(properties.dhcpOptions.dnsServers), strcat_array(properties.dhcpOptions.dnsServers, ', '), 'Azure provided (Default)'),
-    isdefault         = tostring(coalesce(tags.isDefault, tags.Default, iff(name =~ 'default', 'true', 'false'))),
-    azureregion       = location,
-    subscriptionid    = subscriptionId,
-    subscriptionname  = coalesce(subscriptionName, subscriptionId)
-| order by subscriptionname asc, vnetname asc
-"@
+        # Process in chunks of 800 subscriptions to safely respect Azure Resource Graph limits
+        $chunkSize = 800
+        for ($i = 0; $i -lt $targetSubs.Count; $i += $chunkSize) {
+            $chunkLength = [Math]::Min($chunkSize, $targetSubs.Count - $i)
+            $subChunk    = $targetSubs[$i..($i + $chunkLength - 1)]
+            $formattedKqlSubFilter = ($subChunk | ForEach-Object { "'$_'" }) -join ", "
 
-        $rawResults = Search-AzGraph -Subscription $targetSubs -Query $kqlQuery -First 5000
-        Write-Host "[+] Retrieved $($rawResults.Count) Virtual Network(s) across target subscriptions." -ForegroundColor Green
+            $kqlLines = @(
+                "resources",
+                "| where type =~ 'microsoft.network/virtualnetworks'",
+                "| where subscriptionId in ($formattedKqlSubFilter)",
+                "| join kind=leftouter (",
+                "    resourcecontainers",
+                "    | where type =~ 'microsoft.resources/subscriptions'",
+                "    | project subscriptionId, subscriptionName = name",
+                ") on subscriptionId",
+                "| project",
+                "    vnetname          = name,",
+                "    vnetid            = id,",
+                "    addressspace      = strcat_array(properties.addressSpace.addressPrefixes, ', '),",
+                "    provisioningstate = tostring(properties.provisioningState),",
+                "    dnsservers        = iff(isnotempty(properties.dhcpOptions.dnsServers), strcat_array(properties.dhcpOptions.dnsServers, ', '), 'Azure provided (Default)'),",
+                "    isdefault         = tostring(coalesce(tags.isDefault, tags.Default, iff(name =~ 'default', 'true', 'false'))),",
+                "    azureregion       = location,",
+                "    subscriptionid    = subscriptionId,",
+                "    subscriptionname  = coalesce(subscriptionName, subscriptionId)",
+                "| order by subscriptionname asc, vnetname asc"
+            )
+            $kqlQuery = $kqlLines -join "`n"
 
-        foreach ($row in $rawResults) {
-            $vnetRecords.Add([PSCustomObject]@{
-                vnetname          = $row.vnetname
-                vnetid            = $row.vnetid
-                addressspace      = $row.addressspace
-                provisioningstate = $row.provisioningstate
-                dnsservers        = $row.dnsservers
-                isdefault         = $row.isdefault
-                azureregion       = $row.azureregion
-                subscriptionid    = $row.subscriptionid
-                subscriptionname  = $row.subscriptionname
-            })
+            $rawResults = Search-AzGraph -Subscription $subChunk -Query $kqlQuery -First 5000
+            if ($rawResults) {
+                foreach ($row in $rawResults) {
+                    $vnetRecords.Add([PSCustomObject]@{
+                        vnetname          = $row.vnetname
+                        vnetid            = $row.vnetid
+                        addressspace      = $row.addressspace
+                        provisioningstate = $row.provisioningstate
+                        dnsservers        = $row.dnsservers
+                        isdefault         = $row.isdefault
+                        azureregion       = $row.azureregion
+                        subscriptionid    = $row.subscriptionid
+                        subscriptionname  = $row.subscriptionname
+                    })
+                }
+            }
         }
+        Write-Host "[+] Retrieved $($vnetRecords.Count) Virtual Network(s) across target subscriptions." -ForegroundColor Green
     }
     catch {
         Write-Host "[WARN] Azure Resource Graph error: $($_.Exception.Message)" -ForegroundColor Yellow
         Write-Host "       Falling back to standard Az cmdlets (Get-AzVirtualNetwork)..." -ForegroundColor Yellow
         $hasArg = $false
+        $vnetRecords.Clear()
     }
 }
 
@@ -267,17 +346,27 @@ if (-not $hasArg) {
 }
 
 # -------------------------------------------------------------------------
-# 4. EXPORT REPORTS
+# 4. EXPORT REPORTS (Safe multi-MG filenames)
 # -------------------------------------------------------------------------
 Write-Host "`n[STEP 3/3] Exporting VNet Inventory..." -ForegroundColor Cyan
 
-$mgLabel  = ($ManagementGroupId -join "_and_")
-$fileBase = Join-Path $OutputPath "VNet-Inventory-$mgLabel"
+# Build a safe filename label that will never exceed path limits or contain invalid characters
+$cleanMgList = $normalizedMgList | ForEach-Object { $_ -replace '[\\/:*?"<>| ]', '_' }
+$mgFileLabel = if ($cleanMgList.Count -eq 1) {
+    $cleanMgList[0]
+} elseif ($cleanMgList.Count -eq 2) {
+    "$($cleanMgList[0])_and_$($cleanMgList[1])"
+} else {
+    "$($cleanMgList[0])_and_$($cleanMgList.Count - 1)_other_MGs"
+}
+
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$fileBase  = Join-Path $fullOutputPath "VNet-Inventory-$mgFileLabel-$timestamp"
 
 if ($Format -in @('Csv', 'Both')) {
     $csvPath = "$fileBase.csv"
     $vnetRecords | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
-    Write-Host "[+] Generated: $csvPath" -ForegroundColor Green
+    Write-Host "[+] Generated CSV: $csvPath" -ForegroundColor Green
     Write-Host "    Columns: vnetname | vnetid | addressspace | provisioningstate | dnsservers | isdefault | azureregion | subscriptionid | subscriptionname" -ForegroundColor DarkGray
     Write-Host "    Total VNets Exported: $($vnetRecords.Count)" -ForegroundColor DarkGray
 }
@@ -291,18 +380,20 @@ if ($Format -in @('Excel', 'Both') -and $hasImportExcel) {
         FreezeTopRow = $true
     }
     $vnetRecords | Export-Excel -Path $xlsxPath -WorksheetName "VNetInventory" @excelParams
-    Write-Host "[+] Generated: $xlsxPath" -ForegroundColor Green
+    Write-Host "[+] Generated Excel: $xlsxPath" -ForegroundColor Green
 }
 
 Write-Host "`n========================================================" -ForegroundColor Green
 Write-Host " EXTRACTION COMPLETE" -ForegroundColor Green
-Write-Host " Management Groups : $($ManagementGroupId -join ', ')"
+Write-Host " Management Groups : $($normalizedMgList -join ', ')"
 Write-Host " Subscriptions     : $($targetSubs.Count)"
 Write-Host " Total VNets       : $($vnetRecords.Count)"
-Write-Host " Output Directory  : $OutputPath"
+Write-Host " Output Directory  : $fullOutputPath"
 Write-Host "========================================================" -ForegroundColor Green
 
 if ($vnetRecords.Count -gt 0) {
     Write-Host "`nSample Data (First 3 VNets):" -ForegroundColor Yellow
     $vnetRecords | Select-Object -First 3 vnetname, addressspace, provisioningstate, azureregion, subscriptionname | Format-Table -AutoSize | Out-String | Write-Host
 }
+
+return $vnetRecords
