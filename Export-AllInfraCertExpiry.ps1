@@ -712,20 +712,23 @@ if ($allResults.Count -gt 0) {
         Format-Table -AutoSize | Out-String | Write-Host
 
     # -------------------------------------------------------------------------
-    # CSV EXPORT
+    # CSV EXPORT (Always generated so user always has the test result file)
     # -------------------------------------------------------------------------
     if ([string]::IsNullOrWhiteSpace($CsvPath)) {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $baseDir   = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
         $CsvPath   = Join-Path $baseDir "AzureInfra-CertExpiry-$timestamp.csv"
     }
+    $fullCsvPath = [System.IO.Path]::GetFullPath($CsvPath)
 
     $allResults |
         Sort-Object DaysRemaining |
-        Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+        Export-Csv -Path $fullCsvPath -NoTypeInformation -Encoding UTF8
 
     Write-Host ""
-    Write-Host "[+] CSV exported: $CsvPath" -ForegroundColor Green
+    Write-Host "[+] CSV exported successfully!" -ForegroundColor Green
+    Write-Host "    Absolute Path: $fullCsvPath" -ForegroundColor Green
+    Write-Host "    To open file : Invoke-Item `"$fullCsvPath`"" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "    Column guide:" -ForegroundColor Gray
     Write-Host "      WorkloadType       : App Gateway / App Service / Key Vault Cert / KV Secret"     -ForegroundColor Gray
@@ -742,7 +745,36 @@ if ($allResults.Count -gt 0) {
     Write-Host ""
 }
 else {
-    Write-Host "`n[INFO] No certificates found. Check scope and permissions." -ForegroundColor Yellow
+    Write-Host "`n[INFO] No certificates found in the scanned scope." -ForegroundColor Yellow
+
+    if ([string]::IsNullOrWhiteSpace($CsvPath)) {
+        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $baseDir   = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+        $CsvPath   = Join-Path $baseDir "AzureInfra-CertExpiry-$timestamp.csv"
+    }
+    $fullCsvPath = [System.IO.Path]::GetFullPath($CsvPath)
+
+    # Generate template CSV with notification row so the file exists
+    $infoRow = [PSCustomObject]@{
+        WorkloadType        = "INFO"
+        SubscriptionName    = "N/A"
+        SubscriptionId      = ($SubscriptionIds -join ', ')
+        ResourceGroup       = "N/A"
+        ResourceName        = "N/A"
+        CertificateName     = "No certificates found in scanned scope"
+        CommonName          = "N/A"
+        Issuer              = "N/A"
+        Thumbprint          = "N/A"
+        ExpirationDateTime  = "N/A"
+        ExpirationDate_UTC  = "N/A"
+        DaysRemaining       = $null
+        Status              = "NO_CERTIFICATES_FOUND"
+        AssociatedHosts     = "N/A"
+        ParseSource         = "N/A"
+        Notes               = "Verify scope permissions or specify -SubscriptionIds"
+    }
+    $infoRow | Export-Csv -Path $fullCsvPath -NoTypeInformation -Encoding UTF8
+    Write-Host "[+] Empty report CSV generated: $fullCsvPath" -ForegroundColor Green
 }
 
 return $allResults
