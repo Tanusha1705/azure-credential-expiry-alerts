@@ -1,28 +1,26 @@
 <#
 .SYNOPSIS
-    Dedicated Azure Automation Runbook to discover and audit ALL SSL/TLS
-    certificates on Azure Application Gateways across all accessible subscriptions,
-    display the full inventory table in the runbook console, and dispatch
-    color-coded alert emails to workload owners via Microsoft Graph API.
+    Dedicated Azure Automation Runbook to discover and audit ALL SSL/TLS certificates
+    on Azure Application Gateways across all accessible subscriptions. Accurately extracts
+    the leaf (PFX endpoint/server) certificate expiration rather than the root CA,
+    displays the formatted results in the console, and sends alert emails via Microsoft Graph API.
 
 .DESCRIPTION
     Key Highlights:
-      1. Uses Write-Output for all logging so all progress, diagnostics, and
-         results appear live in the Azure Automation Test Pane and Job Output.
+      1. Accurately identifies the true LEAF / End-Entity server certificate from
+         uploaded PFX / PKCS#7 chains by evaluating CA flags, self-signed root status,
+         and earliest expiration date, preventing false reports of Root CA expiry.
       2. Audits ALL certificates (Expired, Urgent, Soon, Active, and Key Vault-linked)
-         so you have 100% full visibility into your Application Gateway SSL landscape.
-      3. Scans across all accessible subscriptions using both Azure Resource Graph
-         and subscription-level enumeration to ensure zero missed gateways.
-      4. Parses directly uploaded certificates (PFX/CER) using X509Certificate2Collection
-         to properly extract leaf certificates from PKCS#7 bundles and chains.
-      5. Inspects Key Vault-linked certificates and resolves secret expiry dates.
-      6. Maps certificates to bound HTTPS Listeners, hostnames (SNI), and ports.
-      7. Outputs a formatted ASCII table directly to the console stream.
-      8. Sends professional HTML audit and alert reports via Microsoft Graph API.
+         for complete visibility into your Application Gateway SSL landscape.
+      3. Outputs the exact formatted table (CertificateName, CommonName, ExpirationDateTime,
+         DaysRemaining, Status, AssociatedListeners) directly to the Azure Automation
+         Test Pane and Job Output stream.
+      4. Discovers Application Gateways across all accessible subscriptions.
+      5. Sends color-coded HTML email reports via Microsoft Graph API.
 
 .NOTES
     Author  : Cloud Infrastructure & Security Engineering Team
-    Version : 2.0 (Full Inventory & Output Visibility Edition)
+    Version : 3.0 (Accurate Leaf PFX Extraction Edition)
     Runtime : PowerShell 7.2 or PowerShell 5.1 Runbook
 #>
 
@@ -62,7 +60,7 @@ function Write-Log {
 }
 
 Write-Log "==========================================================================" "INFO"
-Write-Log "  AZURE APPLICATION GATEWAY SSL CERTIFICATE AUDITOR & ALERTING RUNBOOK   " "INFO"
+Write-Log "  AZURE APPLICATION GATEWAY SSL CERTIFICATE AUDITOR (PFX LEAF EXTRACTOR) " "INFO"
 Write-Log "==========================================================================" "INFO"
 
 # =====================================================================
@@ -85,7 +83,6 @@ catch {
 # =====================================================================
 # 2. LOAD CONFIGURATION / VARIABLES
 # =====================================================================
-# Read variables from Automation Account if not passed via parameters
 $varDays = Get-AutomationVariable -Name "DaysUntilExpiration" -ErrorAction SilentlyContinue
 if (-not [string]::IsNullOrEmpty($varDays)) { $DaysUntilExpiration = [int]$varDays }
 
@@ -138,55 +135,112 @@ if ([string]::IsNullOrEmpty($GraphAppId) -or [string]::IsNullOrEmpty($GraphAppSe
 Write-Log "Settings: Threshold=$DaysUntilExpiration days | IncludeAll=$IncludeAllCertificates | IncludeExpired=$IncludeAlreadyExpired | FallbackOwner=$DefaultOwnerEmail" "INFO"
 
 # =====================================================================
-# 3. HELPER: Parse X509 Certificate from Base64 Data
+# 3. HELPER: Accurately Extract True Leaf (Server/Endpoint) Certificate
 # =====================================================================
-function Parse-AppGwCertificate {
+function Get-LeafCertificateFromBase64 {
     param (
-        [string]$RawCertData,
-        [string]$CertName,
-        [string]$AgwName
+        [string]$Base64Data,
+        [string]$CertName = "ssl-cert"
     )
 
-    if ([string]::IsNullOrWhiteSpace($RawCertData)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($Base64Data)) { return $null }
+    $raw = $Base64Data.Trim()
 
-    # Strategy 1: Use X509Certificate2Collection on raw Base64 bytes (supports leaf certs & PKCS#7 chains)
-    try {
-        $certBytes = [System.Convert]::FromBase64String($RawCertData.Trim())
-        $collection = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
-        $collection.Import($certBytes)
-        if ($collection.Count -gt 0) { return $collection[0] }
-    }
-    catch { }
+    $candidates = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
 
-    # Strategy 2: Single X509Certificate2 DER decode
+    # Strategy 1: Import into X509Certificate2Collection (handles DER and PKCS#7 bundles)
     try {
-        $certBytes = [System.Convert]::FromBase64String($RawCertData.Trim())
-        return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
-    }
-    catch { }
-
-    # Strategy 3: Strip PEM headers
-    try {
-        $pemContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($RawCertData.Trim()))
-        if ($pemContent -match "-----BEGIN CERTIFICATE-----") {
-            $innerB64 = ($pemContent -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
-            $certBytes = [System.Convert]::FromBase64String($innerB64)
-            return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
+        $bytes = [System.Convert]::FromBase64String($raw)
+        $col = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+        $col.Import($bytes)
+        foreach ($c in $col) {
+            if ($c -and $c.Thumbprint) { $candidates.Add($c) }
         }
     }
     catch { }
 
-    # Strategy 4: Raw text PEM string
-    try {
-        if ($RawCertData.Trim() -match "-----BEGIN CERTIFICATE-----") {
-            $innerB64 = ($RawCertData.Trim() -replace "-----BEGIN CERTIFICATE-----","" -replace "-----END CERTIFICATE-----","" -replace "`r","" -replace "`n","" -replace " ","").Trim()
-            $certBytes = [System.Convert]::FromBase64String($innerB64)
-            return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
+    # Strategy 2: If collection didn't yield certs, parse PEM blocks from decoded Base64
+    if ($candidates.Count -eq 0) {
+        try {
+            $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw))
+            $matches = [regex]::Matches($decoded, '(?ms)-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----')
+            foreach ($m in $matches) {
+                $innerB64 = ($m.Groups[1].Value -replace '\r','' -replace '\n','' -replace ' ','').Trim()
+                $certBytes = [System.Convert]::FromBase64String($innerB64)
+                $c = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
+                if ($c -and $c.Thumbprint) { $candidates.Add($c) }
+            }
+        }
+        catch { }
+    }
+
+    # Strategy 3: Raw PEM string containing multiple certificate blocks
+    if ($candidates.Count -eq 0) {
+        try {
+            $matches = [regex]::Matches($raw, '(?ms)-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----')
+            foreach ($m in $matches) {
+                $innerB64 = ($m.Groups[1].Value -replace '\r','' -replace '\n','' -replace ' ','').Trim()
+                $certBytes = [System.Convert]::FromBase64String($innerB64)
+                $c = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
+                if ($c -and $c.Thumbprint) { $candidates.Add($c) }
+            }
+        }
+        catch { }
+    }
+
+    # Strategy 4: Direct single DER bytes
+    if ($candidates.Count -eq 0) {
+        try {
+            $bytes = [System.Convert]::FromBase64String($raw)
+            $c = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
+            if ($c -and $c.Thumbprint) { $candidates.Add($c) }
+        }
+        catch { }
+    }
+
+    if ($candidates.Count -eq 0) { return $null }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+
+    # =========================================================================
+    # MULTI-CERT CHAIN RESOLUTION: SELECT THE TRUE ENDPOINT LEAF CERTIFICATE
+    # =========================================================================
+    # A complete uploaded chain often contains:
+    #   - Leaf Certificate: Valid for ~1 year (earliest NotAfter), Not a CA, Subject != Issuer
+    #   - Intermediate CA: Valid for 5-10 years, BasicConstraints: CA=True
+    #   - Root CA: Valid for 15-25 years, BasicConstraints: CA=True, Subject == Issuer
+
+    # Step A: Filter out Root CAs (Self-signed: Subject == Issuer)
+    $nonSelfSigned = @($candidates | Where-Object { $_.Subject -ne $_.Issuer })
+    if ($nonSelfSigned.Count -eq 0) {
+        $nonSelfSigned = @($candidates)
+    }
+
+    # Step B: Filter out CAs using the Basic Constraints extension
+    $leafCerts = @()
+    foreach ($cert in $nonSelfSigned) {
+        $isCA = $false
+        foreach ($ext in $cert.Extensions) {
+            if ($ext.Oid.Value -eq "2.5.29.19") { # Basic Constraints OID
+                try {
+                    $bc = [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]$ext
+                    if ($bc.CertificateAuthority) { $isCA = $true }
+                }
+                catch { }
+            }
+        }
+        if (-not $isCA) {
+            $leafCerts += $cert
         }
     }
-    catch { }
 
-    return $null
+    # If explicit non-CA certificates were identified, pick the one with the earliest expiration date
+    if ($leafCerts.Count -gt 0) {
+        return ($leafCerts | Sort-Object NotAfter)[0]
+    }
+
+    # Step C: Fallback - in any valid PKCS#7 or PFX bundle, the end-entity leaf
+    # certificate ALWAYS has the shortest validity and earliest NotAfter date.
+    return ($nonSelfSigned | Sort-Object NotAfter)[0]
 }
 
 # =====================================================================
@@ -222,13 +276,13 @@ foreach ($sub in $subscriptions) {
                     elseif ($gw.Tags.ContainsKey('ApplicationOwner')) { $ownerTag = $gw.Tags['ApplicationOwner'] }
                 }
                 $allDiscoveredAppGws += [PSCustomObject]@{
-                    Name           = $gw.Name
-                    ResourceGroup  = $gw.ResourceGroupName
-                    SubscriptionId = $sub.Id
+                    Name             = $gw.Name
+                    ResourceGroup    = $gw.ResourceGroupName
+                    SubscriptionId   = $sub.Id
                     SubscriptionName = $sub.Name
-                    Location       = $gw.Location
-                    OwnerTag       = $ownerTag
-                    GatewayObject  = $gw
+                    Location         = $gw.Location
+                    OwnerTag         = $ownerTag
+                    GatewayObject    = $gw
                 }
             }
             Write-Log "  -> Found $($gws.Count) Application Gateway(s) in '$($sub.Name)'." "INFO"
@@ -251,7 +305,7 @@ if ($allDiscoveredAppGws.Count -eq 0) {
 }
 
 # =====================================================================
-# 5. AUDIT ALL SSL CERTIFICATES
+# 5. AUDIT ALL SSL CERTIFICATES (TRUE LEAF RESOLUTION)
 # =====================================================================
 $allCertRecords = @()
 $now = Get-Date
@@ -292,7 +346,7 @@ foreach ($item in $allDiscoveredAppGws) {
                 }
                 $portVal = if ($lst.FrontendPort -and $lst.FrontendPort.Port) { $lst.FrontendPort.Port } else { "HTTPS" }
                 $descHtml = "$($lst.Name) (Host: <b>$hVal</b>, Port: $portVal)"
-                $descPlain = "$($lst.Name) ($hVal)"
+                $descPlain = if ($hVal -and $hVal -ne "Multi-site / Any") { "$($lst.Name) ($hVal)" } else { $lst.Name }
 
                 if (-not $certListenerMap.ContainsKey($cName)) {
                     $certListenerMap[$cName] = [System.Collections.Generic.List[string]]::new()
@@ -314,10 +368,10 @@ foreach ($item in $allDiscoveredAppGws) {
         $listenersPlain = if ($certListenerPlainMap.ContainsKey($certName)) {
             $certListenerPlainMap[$certName] -join "; "
         } else {
-            "Unattached"
+            "Unattached / No Listener"
         }
 
-        # Case 1: Directly Uploaded Certificate
+        # Case 1: Directly Uploaded Certificate (PFX)
         $rawCertData = if (-not [string]::IsNullOrWhiteSpace($cert.PublicCertData)) { $cert.PublicCertData }
                        elseif (-not [string]::IsNullOrWhiteSpace($cert.Data)) { $cert.Data }
                        elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.publicCertData)) { $cert.properties.publicCertData }
@@ -325,67 +379,81 @@ foreach ($item in $allDiscoveredAppGws) {
                        else { $null }
 
         if (-not [string]::IsNullOrWhiteSpace($rawCertData)) {
-            $x509 = Parse-AppGwCertificate -RawCertData $rawCertData -CertName $certName -AgwName $agwName
+            $leafCert = Get-LeafCertificateFromBase64 -Base64Data $rawCertData -CertName $certName
 
-            if ($x509) {
-                $expDate       = $x509.NotAfter
-                $startDate     = $x509.NotBefore
-                $daysRemaining = [int][Math]::Floor(($expDate - $now).TotalDays)
-                $subjectSimple = $x509.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
-                $subjectFull   = if ($subjectSimple) { $subjectSimple } else { $x509.Subject }
-                $issuerSimple  = $x509.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
-                $issuerFull    = if ($issuerSimple) { $issuerSimple } else { $x509.Issuer }
-                $thumbprint    = $x509.Thumbprint
+            if ($leafCert) {
+                $notAfterLocal = $leafCert.NotAfter
+                $notAfterUtc   = $notAfterLocal.ToUniversalTime()
+                $daysRemaining = [int][Math]::Floor(($notAfterLocal - $now).TotalDays)
+                
+                $commonName = $leafCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+                if ([string]::IsNullOrWhiteSpace($commonName)) { $commonName = $leafCert.Subject }
+                
+                $issuerName = $leafCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
+                if ([string]::IsNullOrWhiteSpace($issuerName)) { $issuerName = $leafCert.Issuer }
+                
+                $thumbprint = $leafCert.Thumbprint
 
-                $status = if ($daysRemaining -le 0) { "EXPIRED" }
-                          elseif ($daysRemaining -le 7) { "EXPIRING URGENT (<= 7 days)" }
-                          elseif ($daysRemaining -le 30) { "EXPIRING SOON (<= 30 days)" }
-                          elseif ($daysRemaining -le 90) { "EXPIRING UPCOMING (<= 90 days)" }
-                          else { "ACTIVE / HEALTHY" }
+                # Standard Status String matching your reference format
+                $status = if ($notAfterLocal -lt $now) {
+                    "EXPIRED ($([Math]::Abs($daysRemaining)) days ago)"
+                }
+                elseif ($daysRemaining -le 7) {
+                    "EXPIRING URGENT ($daysRemaining days left)"
+                }
+                elseif ($daysRemaining -le 30) {
+                    "EXPIRING SOON ($daysRemaining days left)"
+                }
+                elseif ($daysRemaining -le 90) {
+                    "EXPIRING UPCOMING ($daysRemaining days left)"
+                }
+                else {
+                    "ACTIVE ($daysRemaining days left)"
+                }
 
-                Write-Log "  [+] Cert: '$certName' | CN: '$subjectFull' | Expires: $($expDate.ToString('yyyy-MM-dd HH:mm:ss')) UTC | Days: $daysRemaining | Status: $status" "INFO"
+                Write-Log "  [+] PFX Leaf: '$certName' | CN: '$commonName' | Expires (UTC): $($notAfterUtc.ToString('yyyy-MM-dd HH:mm:ss')) | Days: $daysRemaining | Status: $status" "INFO"
 
                 $allCertRecords += [PSCustomObject]@{
-                    ApplicationGateway  = $agwName
-                    ResourceGroup       = $agwRg
-                    SubscriptionName    = $subName
                     SubscriptionId      = $subId
+                    SubscriptionName    = $subName
+                    ResourceGroupName   = $agwRg
+                    AppGatewayName      = $agwName
                     CertificateName     = $certName
-                    CertificateType     = "Directly Uploaded (PFX/CER)"
-                    Subject             = $subjectFull
-                    Issuer              = $issuerFull
+                    CommonName          = $commonName
+                    Issuer              = $issuerName
                     Thumbprint          = $thumbprint
-                    StartDate           = $startDate.ToString("yyyy-MM-dd HH:mm:ss")
-                    EndDate             = $expDate.ToString("yyyy-MM-dd HH:mm:ss")
-                    RemainingDaysCount  = $daysRemaining
+                    ExpirationDateTime  = $notAfterLocal.ToString("yyyy-MM-dd HH:mm:ss")
+                    ExpirationDate_UTC  = $notAfterUtc.ToString("yyyy-MM-dd HH:mm:ss")
+                    DaysRemaining       = $daysRemaining
                     Status              = $status
-                    Owner               = $owner
+                    AssociatedListeners = $listenersPlain
                     ListenersHtml       = $listenersHtml
-                    ListenersPlain      = $listenersPlain
+                    CertificateType     = "Uploaded PFX (Leaf Server Cert)"
+                    Owner               = $owner
                     KeyVaultReference   = "N/A"
                 }
 
-                try { $x509.Dispose() } catch {}
+                try { $leafCert.Dispose() } catch {}
             }
             else {
                 Write-Log "  [!] Could not parse certificate binary data for '$certName' on '$agwName'." "WARN"
                 $allCertRecords += [PSCustomObject]@{
-                    ApplicationGateway  = $agwName
-                    ResourceGroup       = $agwRg
-                    SubscriptionName    = $subName
                     SubscriptionId      = $subId
+                    SubscriptionName    = $subName
+                    ResourceGroupName   = $agwRg
+                    AppGatewayName      = $agwName
                     CertificateName     = $certName
-                    CertificateType     = "Directly Uploaded"
-                    Subject             = "DECODE_NOTICE: Check Format"
+                    CommonName          = "DECODE_FAILED"
                     Issuer              = "N/A"
                     Thumbprint          = "N/A"
-                    StartDate           = "N/A"
-                    EndDate             = "N/A"
-                    RemainingDaysCount  = 9999
-                    Status              = "DECODE_NOTICE"
-                    Owner               = $owner
+                    ExpirationDateTime  = "N/A"
+                    ExpirationDate_UTC  = "N/A"
+                    DaysRemaining       = 9999
+                    Status              = "ERROR: Decode Failed"
+                    AssociatedListeners = $listenersPlain
                     ListenersHtml       = $listenersHtml
-                    ListenersPlain      = $listenersPlain
+                    CertificateType     = "Uploaded PFX"
+                    Owner               = $owner
                     KeyVaultReference   = "N/A"
                 }
             }
@@ -399,38 +467,53 @@ foreach ($item in $allDiscoveredAppGws) {
             $daysRemaining = 9999
             $status     = "KEY VAULT MANAGED"
 
-            # Try to query Key Vault Secret if permissions are present
             try {
-                $kvSecret = Get-AzKeyVaultSecret -VaultName $vaultName -Name $secretName -ErrorAction SilentlyContinue
-                if ($kvSecret -and $kvSecret.Expires) {
-                    $kvExpDate     = $kvSecret.Expires
+                $kvCert = Get-AzKeyVaultCertificate -VaultName $vaultName -Name $secretName -ErrorAction SilentlyContinue
+                if ($kvCert) {
+                    if ($kvCert.Expires) { $kvExpDate = $kvCert.Expires }
+                    elseif ($kvCert.Attributes -and $kvCert.Attributes.Expires) { $kvExpDate = $kvCert.Attributes.Expires }
+                }
+                else {
+                    $kvSec = Get-AzKeyVaultSecret -VaultName $vaultName -Name $secretName -ErrorAction SilentlyContinue
+                    if ($kvSec -and $kvSec.Expires) { $kvExpDate = $kvSec.Expires }
+                }
+
+                if ($kvExpDate) {
                     $daysRemaining = [int][Math]::Floor(($kvExpDate - $now).TotalDays)
-                    $status = if ($daysRemaining -le 0) { "EXPIRED" }
-                              elseif ($daysRemaining -le 7) { "EXPIRING URGENT (<= 7 days)" }
-                              elseif ($daysRemaining -le 30) { "EXPIRING SOON (<= 30 days)" }
-                              else { "ACTIVE (Key Vault)" }
-                    Write-Log "  [+] Key Vault Secret '$secretName' expiry: $($kvExpDate.ToString('yyyy-MM-dd HH:mm:ss')) ($daysRemaining days left)." "INFO"
+                    $status = if ($kvExpDate -lt $now) {
+                        "EXPIRED ($([Math]::Abs($daysRemaining)) days ago)"
+                    }
+                    elseif ($daysRemaining -le 7) {
+                        "EXPIRING URGENT ($daysRemaining days left)"
+                    }
+                    elseif ($daysRemaining -le 30) {
+                        "EXPIRING SOON ($daysRemaining days left)"
+                    }
+                    else {
+                        "ACTIVE ($daysRemaining days left)"
+                    }
+                    Write-Log "  [+] Key Vault '$secretName' expiry: $($kvExpDate.ToString('yyyy-MM-dd HH:mm:ss')) ($daysRemaining days left)." "INFO"
                 }
             }
             catch { }
 
             $allCertRecords += [PSCustomObject]@{
-                ApplicationGateway  = $agwName
-                ResourceGroup       = $agwRg
-                SubscriptionName    = $subName
                 SubscriptionId      = $subId
+                SubscriptionName    = $subName
+                ResourceGroupName   = $agwRg
+                AppGatewayName      = $agwName
                 CertificateName     = $certName
-                CertificateType     = "Key Vault Secret"
-                Subject             = "KV Secret: $secretName"
+                CommonName          = "KeyVault: $secretName"
                 Issuer              = "Azure Key Vault ($vaultName)"
                 Thumbprint          = "Managed in Key Vault"
-                StartDate           = "N/A"
-                EndDate             = if ($kvExpDate) { $kvExpDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
-                RemainingDaysCount  = $daysRemaining
+                ExpirationDateTime  = if ($kvExpDate) { $kvExpDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
+                ExpirationDate_UTC  = if ($kvExpDate) { $kvExpDate.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
+                DaysRemaining       = $daysRemaining
                 Status              = $status
-                Owner               = $owner
+                AssociatedListeners = $listenersPlain
                 ListenersHtml       = $listenersHtml
-                ListenersPlain      = $listenersPlain
+                CertificateType     = "Key Vault Secret Reference"
+                Owner               = $owner
                 KeyVaultReference   = $kvSecretId
             }
         }
@@ -450,36 +533,29 @@ if ($allCertRecords.Count -eq 0) {
 }
 
 # =====================================================================
-# 6. OUTPUT FULL INVENTORY TABLE TO CONSOLE STREAM
+# 6. OUTPUT TEST RESULTS IN EXACT REQUESTED FORMAT
 # =====================================================================
-Write-Log "`n--- COMPLETE APPLICATION GATEWAY CERTIFICATE INVENTORY AUDIT TABLE ---`n" "INFO"
+Write-Output ""
+Write-Output "============================= APPLICATION GATEWAY CERTIFICATE TEST RESULTS ============================="
 
-$consoleTable = $allCertRecords | Sort-Object RemainingDaysCount | Select-Object `
-    @{N='AppGateway';E={$_.ApplicationGateway}}, `
-    @{N='CertName';E={$_.CertificateName}}, `
-    @{N='Subject (CN)';E={$_.Subject}}, `
-    @{N='Type';E={$_.CertificateType}}, `
-    @{N='Expiration Date (UTC)';E={$_.EndDate}}, `
-    @{N='DaysLeft';E={$_.RemainingDaysCount}}, `
-    @{N='Status';E={$_.Status}}, `
-    @{N='Listeners';E={$_.ListenersPlain}} | Format-Table -AutoSize | Out-String
+# Format-Table matches the exact columns from Test-AppGwCertExpiry.ps1
+$consoleTable = $allCertRecords | Sort-Object DaysRemaining | Format-Table -Property CertificateName, CommonName, ExpirationDateTime, DaysRemaining, Status, AssociatedListeners -AutoSize | Out-String
 
 Write-Output $consoleTable
+Write-Output "========================================================================================================"
 
 # =====================================================================
-# 7. FILTER FOR EMAIL DISPATCH (IF APPLICABLE)
+# 7. FILTER FOR EMAIL DISPATCH
 # =====================================================================
 $emailRecords = @()
 
 if ($IncludeAllCertificates -eq "Yes" -or $IncludeAllCertificates -eq "True") {
-    # Include ALL certificates in the email report
     $emailRecords = $allCertRecords
-    Write-Log "Reporting Mode: FULL INVENTORY (Including all $($emailRecords.Count) active and expiring certificates in email)." "INFO"
+    Write-Log "Email Reporting Mode: FULL INVENTORY (Including all $($emailRecords.Count) certificates)." "INFO"
 }
 else {
-    # Filter only expiring/expired items based on threshold
     foreach ($rec in $allCertRecords) {
-        $days = $rec.RemainingDaysCount
+        $days = $rec.DaysRemaining
         if ($IncludeAlreadyExpired -eq "No") {
             if ($days -le $DaysUntilExpiration -and $days -ge 0) { $emailRecords += $rec }
         }
@@ -487,14 +563,11 @@ else {
             if ($days -le $DaysUntilExpiration) { $emailRecords += $rec }
         }
     }
-    Write-Log "Reporting Mode: EXPIRING ONLY (Filtered to $($emailRecords.Count) certificates expiring within $DaysUntilExpiration days)." "INFO"
+    Write-Log "Email Reporting Mode: EXPIRING ONLY (Filtered to $($emailRecords.Count) certificates expiring within $DaysUntilExpiration days)." "INFO"
 }
 
-# Check if email should be sent
-$hasUrgentOrExpired = ($allCertRecords | Where-Object { $_.RemainingDaysCount -le $DaysUntilExpiration }).Count -gt 0
-
 if ($emailRecords.Count -eq 0 -and $SendEmailAlways -ne "Yes") {
-    Write-Log "All certificates are healthy and SendEmailAlways is not enabled. Skipping email transmission." "SUCCESS"
+    Write-Log "All certificates are healthy and SendEmailAlways is not set. Skipping email dispatch." "SUCCESS"
     return
 }
 
@@ -556,20 +629,20 @@ else {
 
 if ($graphToken -and $emailRecords.Count -gt 0) {
     # Group by Application Gateway and Owner
-    $grouped = $emailRecords | Group-Object -Property ApplicationGateway, Owner
+    $grouped = $emailRecords | Group-Object -Property AppGatewayName, Owner
 
     foreach ($grp in $grouped) {
         $firstItem     = $grp.Group[0]
-        $agwName       = $firstItem.ApplicationGateway
-        $rgName        = $firstItem.ResourceGroup
+        $agwName       = $firstItem.AppGatewayName
+        $rgName        = $firstItem.ResourceGroupName
         $subName       = $firstItem.SubscriptionName
         $targetOwner   = $firstItem.Owner
         $totalCerts    = $grp.Group.Count
 
-        $expiredCount  = ($grp.Group | Where-Object { $_.RemainingDaysCount -le 0 }).Count
-        $urgentCount   = ($grp.Group | Where-Object { $_.RemainingDaysCount -le 7  -and $_.RemainingDaysCount -gt 0 }).Count
-        $soonCount     = ($grp.Group | Where-Object { $_.RemainingDaysCount -le 30 -and $_.RemainingDaysCount -gt 7 }).Count
-        $healthyCount  = ($grp.Group | Where-Object { $_.RemainingDaysCount -gt 30 }).Count
+        $expiredCount  = ($grp.Group | Where-Object { $_.DaysRemaining -le 0 }).Count
+        $urgentCount   = ($grp.Group | Where-Object { $_.DaysRemaining -le 7  -and $_.DaysRemaining -gt 0 }).Count
+        $soonCount     = ($grp.Group | Where-Object { $_.DaysRemaining -le 30 -and $_.DaysRemaining -gt 7 }).Count
+        $healthyCount  = ($grp.Group | Where-Object { $_.DaysRemaining -gt 30 }).Count
 
         Write-Log "Generating HTML email for '$agwName' (Total: $totalCerts | Expired: $expiredCount | Urgent: $urgentCount | Healthy: $healthyCount)..." "INFO"
 
@@ -605,18 +678,13 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
 
         # Banner Header
         $mailHtml += '<div class="header-box">'
-        $alertTitle = if ($expiredCount -gt 0) { "CRITICAL ALERT: Expired SSL Certificate(s)" }
-                      elseif ($urgentCount -gt 0) { "URGENT ALERT: SSL Certificate(s) Expiring &le; 7 Days" }
-                      elseif ($soonCount -gt 0) { "WARNING: SSL Certificate(s) Expiring Soon" }
-                      else { "Certificate Audit Report: All Certificates Healthy" }
-
-        $mailHtml += "<h2>&#128274; Application Gateway SSL Certificate Audit: $agwName</h2>"
+        $mailHtml += "<h2>&#128274; Application Gateway SSL Certificate Inventory: $agwName</h2>"
         $mailHtml += "<p>Resource Group: <b>$rgName</b> &nbsp;|&nbsp; Subscription: <b>$subName</b></p>"
         $mailHtml += '</div>'
 
         $mailHtml += '<div class="content-box">'
         $mailHtml += "<p>Dear <b>$targetOwner</b>,</p>"
-        $mailHtml += "<p>Below is the complete SSL certificate inventory and expiration audit for Azure Application Gateway <b>$agwName</b>.</p>"
+        $mailHtml += "<p>Below is the accurate SSL certificate inventory and expiration audit for Azure Application Gateway <b>$agwName</b>.</p>"
 
         # Summary Block
         $mailHtml += '<div class="summary-card">'
@@ -637,20 +705,21 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
         }
         $mailHtml += '</ul></div>'
 
-        # Certificate Table
+        # Certificate Table Matching Format
         $mailHtml += '<table><thead><tr>'
         $mailHtml += '<th>Certificate Name</th>'
-        $mailHtml += '<th>Type</th>'
-        $mailHtml += '<th>Subject (CN)</th>'
+        $mailHtml += '<th>Common Name (Leaf Domain)</th>'
         $mailHtml += '<th>Bound HTTPS Listeners</th>'
+        $mailHtml += '<th>Issuer</th>'
         $mailHtml += '<th>Thumbprint</th>'
+        $mailHtml += '<th>Expiration Date (Local)</th>'
         $mailHtml += '<th>Expiration Date (UTC)</th>'
         $mailHtml += '<th>Days Remaining</th>'
         $mailHtml += '<th>Status</th>'
         $mailHtml += '</tr></thead><tbody>'
 
-        foreach ($row in ($grp.Group | Sort-Object RemainingDaysCount)) {
-            $d = $row.RemainingDaysCount
+        foreach ($row in ($grp.Group | Sort-Object DaysRemaining)) {
+            $d = $row.DaysRemaining
             $rowCss = ""
             $badgeCss = ""
 
@@ -668,16 +737,17 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
             }
             else {
                 $rowCss = "row-healthy"
-                $badgeCss = if ($row.CertificateType -like "*Key Vault*") { "<span class='badge badge-kv'>KEY VAULT</span>" } else { "<span class='badge badge-healthy'>HEALTHY</span>" }
+                $badgeCss = if ($row.CertificateType -like "*Key Vault*") { "<span class='badge badge-kv'>KEY VAULT</span>" } else { "<span class='badge badge-healthy'>ACTIVE</span>" }
             }
 
             $mailHtml += "<tr class='$rowCss'>"
             $mailHtml += "<td><b>$($row.CertificateName)</b></td>"
-            $mailHtml += "<td>$($row.CertificateType)</td>"
-            $mailHtml += "<td>$($row.Subject)</td>"
+            $mailHtml += "<td><b>$($row.CommonName)</b></td>"
             $mailHtml += "<td>$($row.ListenersHtml)</td>"
+            $mailHtml += "<td>$($row.Issuer)</td>"
             $mailHtml += "<td style='font-family:monospace; font-size:11px;'>$($row.Thumbprint)</td>"
-            $mailHtml += "<td><b>$($row.EndDate)</b></td>"
+            $mailHtml += "<td>$($row.ExpirationDateTime)</td>"
+            $mailHtml += "<td><b>$($row.ExpirationDate_UTC)</b></td>"
             $daysDisplay = if ($d -eq 9999) { "N/A" } else { "$d day(s)" }
             $mailHtml += "<td style='text-align:center;'><b>$daysDisplay</b></td>"
             $mailHtml += "<td style='text-align:center;'>$badgeCss</td>"

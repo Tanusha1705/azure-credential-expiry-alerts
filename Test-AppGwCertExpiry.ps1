@@ -79,8 +79,45 @@ $results = foreach ($cert in $uploadedCerts) {
         $collection = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
         $collection.Import($rawBytes)
 
-        # The first or leaf certificate in the bundle represents the endpoint certificate
-        $leafCert = $collection[0]
+        # Accurately select the End-Entity (Leaf / PFX Server) certificate (not the Root or Intermediate CA)
+        $candidates = @($collection | Where-Object { $_ -and $_.Thumbprint })
+        $leafCert = $null
+
+        if ($candidates.Count -eq 1) {
+            $leafCert = $candidates[0]
+        }
+        elseif ($candidates.Count -gt 1) {
+            # Filter out Root CAs (Subject == Issuer)
+            $nonRoot = @($candidates | Where-Object { $_.Subject -ne $_.Issuer })
+            if ($nonRoot.Count -eq 0) { $nonRoot = @($candidates) }
+
+            # Filter out Intermediate CAs via Basic Constraints extension
+            $explicitLeafs = @()
+            foreach ($c in $nonRoot) {
+                $isCA = $false
+                foreach ($ext in $c.Extensions) {
+                    if ($ext.Oid.Value -eq "2.5.29.19") {
+                        try {
+                            $bc = [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]$ext
+                            if ($bc.CertificateAuthority) { $isCA = $true }
+                        } catch { }
+                    }
+                }
+                if (-not $isCA) { $explicitLeafs += $c }
+            }
+
+            if ($explicitLeafs.Count -gt 0) {
+                $leafCert = ($explicitLeafs | Sort-Object NotAfter)[0]
+            }
+            else {
+                # Fallback: shortest validity / earliest expiration date is always the server leaf certificate
+                $leafCert = ($nonRoot | Sort-Object NotAfter)[0]
+            }
+        }
+
+        if (-not $leafCert) {
+            throw "Unable to extract leaf certificate from collection."
+        }
         $notAfterLocal = $leafCert.NotAfter
         $notAfterUtc   = $notAfterLocal.ToUniversalTime()
         $daysRemaining = [int][Math]::Floor(($notAfterLocal - $now).TotalDays)
