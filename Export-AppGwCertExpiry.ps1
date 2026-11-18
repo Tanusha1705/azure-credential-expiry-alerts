@@ -72,8 +72,8 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Filter to a specific Application Gateway")]
     [string]$AppGatewayName,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Include Key Vault-referenced certificates in addition to uploaded PFX certs")]
-    [switch]$IncludeKeyVaultCertificates,
+    [Parameter(Mandatory = $false, HelpMessage = "Include Key Vault-referenced certificates in addition to uploaded PFX certs (Default: $true for full list)")]
+    [bool]$IncludeKeyVaultCertificates = $true,
 
     [Parameter(Mandatory = $false, HelpMessage = "Threshold in days for expiration alert flagging")]
     [int]$DaysUntilExpiration = 30,
@@ -702,15 +702,6 @@ Write-Host "  [+] ACTIVE (> 90 days)     : $activeCerts" -ForegroundColor Green
 Write-Host "==========================================================================" -ForegroundColor Cyan
 Write-Host ""
 
-if ($totalCerts -eq 0) {
-    Write-Warning "No SSL/TLS certificates matching criteria were found."
-    return
-}
-
-# Display Table in Console
-Write-Host "============================== CERTIFICATE DETAILS ==============================" -ForegroundColor Yellow
-$allCertRecords | Sort-Object DaysRemaining | Format-Table -Property CertificateName, CommonName, ExpirationDateTime_Local, DaysRemaining, ExpiryStatus, AssociatedListeners -AutoSize
-
 # =============================================================================
 # 6. EXPORT RESULTS TO CSV FILE
 # =============================================================================
@@ -728,17 +719,76 @@ else {
 }
 
 try {
-    $allCertRecords | Sort-Object DaysRemaining | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host ""
-    Write-Host "[SUCCESS] CSV export created successfully!" -ForegroundColor Green
-    Write-Host "          Output File : $CsvPath" -ForegroundColor Green
-    Write-Host "          Total Rows  : $($allCertRecords.Count)" -ForegroundColor Green
-    Write-Host "=================================================================================" -ForegroundColor Yellow
+    if ($allCertRecords.Count -gt 0) {
+        $allCertRecords | Sort-Object DaysRemaining | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+    }
+    else {
+        # Create empty CSV with proper headers
+        [PSCustomObject]@{
+            SubscriptionId           = ""
+            SubscriptionName         = ""
+            ResourceGroupName        = ""
+            AppGatewayName           = ""
+            GatewayState             = ""
+            GatewayLocation          = ""
+            CertificateName          = ""
+            CertificateSource        = ""
+            CommonName               = ""
+            Subject                  = ""
+            Issuer                   = ""
+            IssuerDN                 = ""
+            SerialNumber             = ""
+            Thumbprint               = ""
+            SignatureAlgorithm       = ""
+            PublicKeyAlgorithm       = ""
+            ValidFrom_Local          = ""
+            ValidFrom_UTC            = ""
+            ExpirationDateTime_Local = ""
+            ExpirationDateTime_UTC   = ""
+            DaysRemaining            = ""
+            ExpiryStatus             = ""
+            AssociatedListeners      = ""
+            AssociatedHostNames      = ""
+            ListenerCount            = ""
+            IsAttachedToListener     = ""
+            KeyVaultSecretId         = ""
+            GatewayTags              = ""
+            ScanTimestamp_UTC        = ""
+        } | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+    }
 }
 catch {
     Write-Error "Failed to export CSV to '$CsvPath': $($_.Exception.Message)"
 }
 
+# Display Table in Console (Using Out-String to prevent pipeline collision)
+if ($allCertRecords.Count -gt 0) {
+    Write-Host "============================== CERTIFICATE DETAILS ==============================" -ForegroundColor Yellow
+    $tableOutput = $allCertRecords | Sort-Object DaysRemaining | Format-Table -Property CertificateName, CommonName, ExpirationDateTime_Local, DaysRemaining, ExpiryStatus, AssociatedListeners -AutoSize | Out-String
+    Write-Host $tableOutput
+}
+
+# Resolve full absolute path and file name
+$csvFileName = [System.IO.Path]::GetFileName($CsvPath)
+$resolvedFullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CsvPath)
+
+# Prominently display the final CSV path and Cloud Shell download command
 Write-Host ""
-return $allCertRecords
+Write-Host "==========================================================================================" -ForegroundColor Green
+Write-Host " [SUCCESS] FULL CERTIFICATE EXPIRY AUDIT REPORT GENERATED!                                " -ForegroundColor Green
+Write-Host "==========================================================================================" -ForegroundColor Green
+Write-Host "  CSV FILE NAME : $csvFileName" -ForegroundColor Yellow
+Write-Host "  CSV FULL PATH : $resolvedFullPath" -ForegroundColor Yellow
+Write-Host "  TOTAL RECORDS : $($allCertRecords.Count) certificate(s)" -ForegroundColor White
+Write-Host "------------------------------------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  >>> TO DOWNLOAD THIS CSV TO YOUR COMPUTER IN AZURE CLOUD SHELL, RUN THIS COMMAND:" -ForegroundColor Cyan
+Write-Host "      download ""$csvFileName""" -ForegroundColor White
+Write-Host "==========================================================================================" -ForegroundColor Green
+Write-Host ""
+
+# Store records in global variable for interactive inspection
+$global:AppGwCertResults = $allCertRecords
+$global:AppGwCertCsvPath = $resolvedFullPath
+
+return $resolvedFullPath
 
