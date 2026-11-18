@@ -440,19 +440,22 @@ foreach ($sub in $targetSubscriptions) {
             # Listeners info
             $listenersPlain = if ($certListenerMap.ContainsKey($certName)) {
                 $certListenerMap[$certName] -join " | "
-            } else {
+            }
+            else {
                 "Unattached / No Listener"
             }
 
             $hostnamesPlain = if ($certHostnamesMap.ContainsKey($certName) -and $certHostnamesMap[$certName].Count -gt 0) {
                 $certHostnamesMap[$certName] -join ", "
-            } else {
+            }
+            else {
                 "N/A"
             }
 
             $listenerCount = if ($certListenerCountMap.ContainsKey($certName)) {
                 $certListenerCountMap[$certName]
-            } else {
+            }
+            else {
                 0
             }
 
@@ -462,10 +465,10 @@ foreach ($sub in $targetSubscriptions) {
             if (-not $isKvLinked) {
                 # Retrieve base64 certificate data from available properties
                 $rawCertData = if (-not [string]::IsNullOrWhiteSpace($cert.PublicCertData)) { $cert.PublicCertData }
-                               elseif (-not [string]::IsNullOrWhiteSpace($cert.Data)) { $cert.Data }
-                               elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.publicCertData)) { $cert.properties.publicCertData }
-                               elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.data)) { $cert.properties.data }
-                               else { $null }
+                elseif (-not [string]::IsNullOrWhiteSpace($cert.Data)) { $cert.Data }
+                elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.publicCertData)) { $cert.properties.publicCertData }
+                elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.data)) { $cert.properties.data }
+                else { $null }
 
                 if (-not [string]::IsNullOrWhiteSpace($rawCertData)) {
                     $leafCert = $null
@@ -478,10 +481,10 @@ foreach ($sub in $targetSubscriptions) {
 
                     if ($leafCert) {
                         $notBeforeLocal = $leafCert.NotBefore
-                        $notBeforeUtc   = $notBeforeLocal.ToUniversalTime()
-                        $notAfterLocal  = $leafCert.NotAfter
-                        $notAfterUtc    = $notAfterLocal.ToUniversalTime()
-                        $daysRemaining  = [int][Math]::Floor(($notAfterLocal - $now).TotalDays)
+                        $notBeforeUtc = $notBeforeLocal.ToUniversalTime()
+                        $notAfterLocal = $leafCert.NotAfter
+                        $notAfterUtc = $notAfterLocal.ToUniversalTime()
+                        $daysRemaining = [int][Math]::Floor(($notAfterLocal - $now).TotalDays)
 
                         $cn = $leafCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
                         if ([string]::IsNullOrWhiteSpace($cn)) { $cn = $leafCert.Subject }
@@ -489,10 +492,10 @@ foreach ($sub in $targetSubscriptions) {
                         $issuerCN = $leafCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
                         if ([string]::IsNullOrWhiteSpace($issuerCN)) { $issuerCN = $leafCert.Issuer }
 
-                        $thumbprint   = $leafCert.Thumbprint
+                        $thumbprint = $leafCert.Thumbprint
                         $serialNumber = $leafCert.SerialNumber
-                        $sigAlg       = $leafCert.SignatureAlgorithm.FriendlyName
-                        $keyAlg       = "$($leafCert.PublicKey.Oid.FriendlyName) ($($leafCert.PublicKey.Key.KeySize) bits)"
+                        $sigAlg = $leafCert.SignatureAlgorithm.FriendlyName
+                        $keyAlg = "$($leafCert.PublicKey.Oid.FriendlyName) ($($leafCert.PublicKey.Key.KeySize) bits)"
 
                         # Status Label
                         $status = if ($notAfterLocal -lt $now) {
@@ -512,9 +515,9 @@ foreach ($sub in $targetSubscriptions) {
                         }
 
                         $statusColor = if ($notAfterLocal -lt $now) { "Red" }
-                                       elseif ($daysRemaining -le 7) { "Magenta" }
-                                       elseif ($daysRemaining -le 30) { "Yellow" }
-                                       else { "Green" }
+                        elseif ($daysRemaining -le 7) { "Magenta" }
+                        elseif ($daysRemaining -le 30) { "Yellow" }
+                        else { "Green" }
 
                         Write-Host "      [PFX] $certName | CN: $cn | Expiry: $($notAfterLocal.ToString('yyyy-MM-dd HH:mm:ss')) | Days: $daysRemaining | Status: $status" -ForegroundColor $statusColor
 
@@ -556,36 +559,36 @@ foreach ($sub in $targetSubscriptions) {
                     else {
                         Write-Warning "Failed to extract leaf certificate from binary data for '$certName' on '$agwName'."
                         $allCertRecords.Add([PSCustomObject]@{
-                            SubscriptionId           = $subId
-                            SubscriptionName         = $subName
-                            ResourceGroupName        = $agwRg
-                            AppGatewayName           = $agwName
-                            GatewayState             = $agwState
-                            GatewayLocation          = $agwLocation
-                            CertificateName          = $certName
-                            CertificateSource        = "Directly Uploaded (PFX)"
-                            CommonName               = "DECODE_FAILED"
-                            Subject                  = "DECODE_FAILED"
-                            Issuer                   = "N/A"
-                            IssuerDN                 = "N/A"
-                            SerialNumber             = "N/A"
-                            Thumbprint               = "N/A"
-                            SignatureAlgorithm       = "N/A"
-                            PublicKeyAlgorithm       = "N/A"
-                            ValidFrom_Local          = "N/A"
-                            ValidFrom_UTC            = "N/A"
-                            ExpirationDateTime_Local = "DECODE_FAILED"
-                            ExpirationDateTime_UTC   = "DECODE_FAILED"
-                            DaysRemaining            = $null
-                            ExpiryStatus             = "ERROR: Decode Failed"
-                            AssociatedListeners      = $listenersPlain
-                            AssociatedHostNames      = $hostnamesPlain
-                            ListenerCount            = $listenerCount
-                            IsAttachedToListener     = $isAttached
-                            KeyVaultSecretId         = "N/A - Direct Upload"
-                            GatewayTags              = $tagStr
-                            ScanTimestamp_UTC        = $scanTimestampUtc
-                        })
+                                SubscriptionId           = $subId
+                                SubscriptionName         = $subName
+                                ResourceGroupName        = $agwRg
+                                AppGatewayName           = $agwName
+                                GatewayState             = $agwState
+                                GatewayLocation          = $agwLocation
+                                CertificateName          = $certName
+                                CertificateSource        = "Directly Uploaded (PFX)"
+                                CommonName               = "DECODE_FAILED"
+                                Subject                  = "DECODE_FAILED"
+                                Issuer                   = "N/A"
+                                IssuerDN                 = "N/A"
+                                SerialNumber             = "N/A"
+                                Thumbprint               = "N/A"
+                                SignatureAlgorithm       = "N/A"
+                                PublicKeyAlgorithm       = "N/A"
+                                ValidFrom_Local          = "N/A"
+                                ValidFrom_UTC            = "N/A"
+                                ExpirationDateTime_Local = "DECODE_FAILED"
+                                ExpirationDateTime_UTC   = "DECODE_FAILED"
+                                DaysRemaining            = $null
+                                ExpiryStatus             = "ERROR: Decode Failed"
+                                AssociatedListeners      = $listenersPlain
+                                AssociatedHostNames      = $hostnamesPlain
+                                ListenerCount            = $listenerCount
+                                IsAttachedToListener     = $isAttached
+                                KeyVaultSecretId         = "N/A - Direct Upload"
+                                GatewayTags              = $tagStr
+                                ScanTimestamp_UTC        = $scanTimestampUtc
+                            })
                     }
                 }
                 else {
@@ -636,36 +639,36 @@ foreach ($sub in $targetSubscriptions) {
                 Write-Host "      [KV] $certName | Secret: $secretName | Vault: $vaultName | Status: $status" -ForegroundColor Cyan
 
                 $allCertRecords.Add([PSCustomObject]@{
-                    SubscriptionId           = $subId
-                    SubscriptionName         = $subName
-                    ResourceGroupName        = $agwRg
-                    AppGatewayName           = $agwName
-                    GatewayState             = $agwState
-                    GatewayLocation          = $agwLocation
-                    CertificateName          = $certName
-                    CertificateSource        = "Key Vault Secret Reference"
-                    CommonName               = "KeyVault: $secretName"
-                    Subject                  = "KeyVault: $secretName (Vault: $vaultName)"
-                    Issuer                   = "Azure Key Vault ($vaultName)"
-                    IssuerDN                 = "Azure Key Vault ($vaultName)"
-                    SerialNumber             = "Managed in Key Vault"
-                    Thumbprint               = "Managed in Key Vault"
-                    SignatureAlgorithm       = "N/A"
-                    PublicKeyAlgorithm       = "N/A"
-                    ValidFrom_Local          = "N/A"
-                    ValidFrom_UTC            = "N/A"
-                    ExpirationDateTime_Local = if ($kvExpDate) { $kvExpDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
-                    ExpirationDateTime_UTC   = if ($kvExpDate) { $kvExpDate.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
-                    DaysRemaining            = $daysRemaining
-                    ExpiryStatus             = $status
-                    AssociatedListeners      = $listenersPlain
-                    AssociatedHostNames      = $hostnamesPlain
-                    ListenerCount            = $listenerCount
-                    IsAttachedToListener     = $isAttached
-                    KeyVaultSecretId         = $kvSecretId
-                    GatewayTags              = $tagStr
-                    ScanTimestamp_UTC        = $scanTimestampUtc
-                })
+                        SubscriptionId           = $subId
+                        SubscriptionName         = $subName
+                        ResourceGroupName        = $agwRg
+                        AppGatewayName           = $agwName
+                        GatewayState             = $agwState
+                        GatewayLocation          = $agwLocation
+                        CertificateName          = $certName
+                        CertificateSource        = "Key Vault Secret Reference"
+                        CommonName               = "KeyVault: $secretName"
+                        Subject                  = "KeyVault: $secretName (Vault: $vaultName)"
+                        Issuer                   = "Azure Key Vault ($vaultName)"
+                        IssuerDN                 = "Azure Key Vault ($vaultName)"
+                        SerialNumber             = "Managed in Key Vault"
+                        Thumbprint               = "Managed in Key Vault"
+                        SignatureAlgorithm       = "N/A"
+                        PublicKeyAlgorithm       = "N/A"
+                        ValidFrom_Local          = "N/A"
+                        ValidFrom_UTC            = "N/A"
+                        ExpirationDateTime_Local = if ($kvExpDate) { $kvExpDate.ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
+                        ExpirationDateTime_UTC   = if ($kvExpDate) { $kvExpDate.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss") } else { "Managed in KV ($vaultName)" }
+                        DaysRemaining            = $daysRemaining
+                        ExpiryStatus             = $status
+                        AssociatedListeners      = $listenersPlain
+                        AssociatedHostNames      = $hostnamesPlain
+                        ListenerCount            = $listenerCount
+                        IsAttachedToListener     = $isAttached
+                        KeyVaultSecretId         = $kvSecretId
+                        GatewayTags              = $tagStr
+                        ScanTimestamp_UTC        = $scanTimestampUtc
+                    })
             }
         }
     }
@@ -679,13 +682,13 @@ Write-Host "====================================================================
 Write-Host "                           AUDIT SUMMARY METRICS                          " -ForegroundColor Cyan
 Write-Host "==========================================================================" -ForegroundColor Cyan
 
-$totalCerts   = $allCertRecords.Count
+$totalCerts = $allCertRecords.Count
 $expiredCerts = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -lt 0 }).Count
-$urgentCerts  = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -ge 0 -and $_.DaysRemaining -le 7 }).Count
-$soonCerts    = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 7 -and $_.DaysRemaining -le 30 }).Count
-$upcomingCerts= ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 30 -and $_.DaysRemaining -le 90 }).Count
-$activeCerts  = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 90 }).Count
-$uploadedCount= ($allCertRecords | Where-Object { $_.CertificateSource -eq "Directly Uploaded (PFX)" }).Count
+$urgentCerts = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -ge 0 -and $_.DaysRemaining -le 7 }).Count
+$soonCerts = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 7 -and $_.DaysRemaining -le 30 }).Count
+$upcomingCerts = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 30 -and $_.DaysRemaining -le 90 }).Count
+$activeCerts = ($allCertRecords | Where-Object { $_.DaysRemaining -ne $null -and $_.DaysRemaining -gt 90 }).Count
+$uploadedCount = ($allCertRecords | Where-Object { $_.CertificateSource -eq "Directly Uploaded (PFX)" }).Count
 
 Write-Host "  Total Gateways Audited     : $appGwCounter" -ForegroundColor White
 Write-Host "  Total Certificates Found   : $totalCerts" -ForegroundColor White
@@ -738,3 +741,4 @@ catch {
 
 Write-Host ""
 return $allCertRecords
+
