@@ -102,25 +102,25 @@ $CCRecipientsVar = Get-AutomationVariable -Name "EmailCC_AppGatewayCertExpiry" -
 $CCRecipients = @()
 if (-not [string]::IsNullOrEmpty($CCRecipientsVar)) {
     $CCRecipients = @($CCRecipientsVar.Split(",") | ForEach-Object {
-        $addr = $_.Trim()
-        if (-not [string]::IsNullOrEmpty($addr)) { @{ emailAddress = @{ address = $addr } } }
-    })
+            $addr = $_.Trim()
+            if (-not [string]::IsNullOrEmpty($addr)) { @{ emailAddress = @{ address = $addr } } }
+        })
 }
 
 $BCCRecipientsVar = Get-AutomationVariable -Name "EmailBCC_AppGatewayCertExpiry" -ErrorAction SilentlyContinue
 $BCCRecipients = @()
 if (-not [string]::IsNullOrEmpty($BCCRecipientsVar)) {
     $BCCRecipients = @($BCCRecipientsVar.Split(",") | ForEach-Object {
-        $addr = $_.Trim()
-        if (-not [string]::IsNullOrEmpty($addr)) { @{ emailAddress = @{ address = $addr } } }
-    })
+            $addr = $_.Trim()
+            if (-not [string]::IsNullOrEmpty($addr)) { @{ emailAddress = @{ address = $addr } } }
+        })
 }
 
 $GraphSenderEmail = Get-AutomationVariable -Name "GraphSenderEmail" -ErrorAction SilentlyContinue
 if ([string]::IsNullOrEmpty($GraphSenderEmail)) { $GraphSenderEmail = "azure-notifications@yourdomain.com" }
 
-$GraphAppId     = Get-AutomationVariable -Name "GraphAppId" -ErrorAction SilentlyContinue
-$GraphTenantId  = Get-AutomationVariable -Name "GraphTenantId" -ErrorAction SilentlyContinue
+$GraphAppId = Get-AutomationVariable -Name "GraphAppId" -ErrorAction SilentlyContinue
+$GraphTenantId = Get-AutomationVariable -Name "GraphTenantId" -ErrorAction SilentlyContinue
 $GraphAppSecret = Get-AutomationVariable -Name "GraphAppSecret" -ErrorAction SilentlyContinue
 
 if ([string]::IsNullOrEmpty($GraphAppId) -or [string]::IsNullOrEmpty($GraphAppSecret)) {
@@ -165,7 +165,7 @@ function Get-LeafCertificateFromBase64 {
             $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw))
             $matches = [regex]::Matches($decoded, '(?ms)-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----')
             foreach ($m in $matches) {
-                $innerB64 = ($m.Groups[1].Value -replace '\r','' -replace '\n','' -replace ' ','').Trim()
+                $innerB64 = ($m.Groups[1].Value -replace '\r', '' -replace '\n', '' -replace ' ', '').Trim()
                 $certBytes = [System.Convert]::FromBase64String($innerB64)
                 $c = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                 if ($c -and $c.Thumbprint) { $candidates.Add($c) }
@@ -179,7 +179,7 @@ function Get-LeafCertificateFromBase64 {
         try {
             $matches = [regex]::Matches($raw, '(?ms)-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----')
             foreach ($m in $matches) {
-                $innerB64 = ($m.Groups[1].Value -replace '\r','' -replace '\n','' -replace ' ','').Trim()
+                $innerB64 = ($m.Groups[1].Value -replace '\r', '' -replace '\n', '' -replace ' ', '').Trim()
                 $certBytes = [System.Convert]::FromBase64String($innerB64)
                 $c = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
                 if ($c -and $c.Thumbprint) { $candidates.Add($c) }
@@ -220,7 +220,8 @@ function Get-LeafCertificateFromBase64 {
     foreach ($cert in $nonSelfSigned) {
         $isCA = $false
         foreach ($ext in $cert.Extensions) {
-            if ($ext.Oid.Value -eq "2.5.29.19") { # Basic Constraints OID
+            if ($ext.Oid.Value -eq "2.5.29.19") {
+                # Basic Constraints OID
                 try {
                     $bc = [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]$ext
                     if ($bc.CertificateAuthority) { $isCA = $true }
@@ -312,11 +313,11 @@ $now = Get-Date
 
 foreach ($item in $allDiscoveredAppGws) {
     $agwName = $item.Name
-    $agwRg   = $item.ResourceGroup
-    $subId   = $item.SubscriptionId
+    $agwRg = $item.ResourceGroup
+    $subId = $item.SubscriptionId
     $subName = $item.SubscriptionName
-    $gwObj   = $item.GatewayObject
-    $owner   = if (-not [string]::IsNullOrWhiteSpace($item.OwnerTag)) { $item.OwnerTag } else { $DefaultOwnerEmail }
+    $gwObj = $item.GatewayObject
+    $owner = if (-not [string]::IsNullOrWhiteSpace($item.OwnerTag)) { $item.OwnerTag } else { $DefaultOwnerEmail }
 
     Write-Log "Evaluating SSL certificates for Application Gateway '$agwName' [$agwRg]..." "INFO"
 
@@ -362,28 +363,30 @@ foreach ($item in $allDiscoveredAppGws) {
         $certName = $cert.Name
         $listenersHtml = if ($certListenerMap.ContainsKey($certName)) {
             $certListenerMap[$certName] -join "<br>"
-        } else {
+        }
+        else {
             "<span style='color:#888;'>Unattached / No Listener</span>"
         }
         $listenersPlain = if ($certListenerPlainMap.ContainsKey($certName)) {
             $certListenerPlainMap[$certName] -join "; "
-        } else {
+        }
+        else {
             "Unattached / No Listener"
         }
 
         # Case 1: Directly Uploaded Certificate (PFX)
         $rawCertData = if (-not [string]::IsNullOrWhiteSpace($cert.PublicCertData)) { $cert.PublicCertData }
-                       elseif (-not [string]::IsNullOrWhiteSpace($cert.Data)) { $cert.Data }
-                       elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.publicCertData)) { $cert.properties.publicCertData }
-                       elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.data)) { $cert.properties.data }
-                       else { $null }
+        elseif (-not [string]::IsNullOrWhiteSpace($cert.Data)) { $cert.Data }
+        elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.publicCertData)) { $cert.properties.publicCertData }
+        elseif ($cert.properties -and -not [string]::IsNullOrWhiteSpace($cert.properties.data)) { $cert.properties.data }
+        else { $null }
 
         if (-not [string]::IsNullOrWhiteSpace($rawCertData)) {
             $leafCert = Get-LeafCertificateFromBase64 -Base64Data $rawCertData -CertName $certName
 
             if ($leafCert) {
                 $notAfterLocal = $leafCert.NotAfter
-                $notAfterUtc   = $notAfterLocal.ToUniversalTime()
+                $notAfterUtc = $notAfterLocal.ToUniversalTime()
                 $daysRemaining = [int][Math]::Floor(($notAfterLocal - $now).TotalDays)
                 
                 $commonName = $leafCert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
@@ -461,11 +464,11 @@ foreach ($item in $allDiscoveredAppGws) {
         # Case 2: Key Vault-Linked Certificate
         elseif (-not [string]::IsNullOrWhiteSpace($cert.KeyVaultSecretId)) {
             $kvSecretId = $cert.KeyVaultSecretId
-            $vaultName  = $kvSecretId.Split('/')[2].Split('.')[0]
+            $vaultName = $kvSecretId.Split('/')[2].Split('.')[0]
             $secretName = $kvSecretId.Split('/')[4]
-            $kvExpDate  = $null
+            $kvExpDate = $null
             $daysRemaining = 9999
-            $status     = "KEY VAULT MANAGED"
+            $status = "KEY VAULT MANAGED"
 
             try {
                 $kvCert = Get-AzKeyVaultCertificate -VaultName $vaultName -Name $secretName -ErrorAction SilentlyContinue
@@ -606,7 +609,7 @@ function Send-GraphEmail {
                 toRecipients = @($To)
             }
         }
-        if ($Cc -and $Cc.Count -gt 0)   { $emailData.message["ccRecipients"]  = @($Cc) }
+        if ($Cc -and $Cc.Count -gt 0) { $emailData.message["ccRecipients"] = @($Cc) }
         if ($Bcc -and $Bcc.Count -gt 0) { $emailData.message["bccRecipients"] = @($Bcc) }
 
         $jsonBody = $emailData | ConvertTo-Json -Depth 100
@@ -632,22 +635,22 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
     $grouped = $emailRecords | Group-Object -Property AppGatewayName, Owner
 
     foreach ($grp in $grouped) {
-        $firstItem     = $grp.Group[0]
-        $agwName       = $firstItem.AppGatewayName
-        $rgName        = $firstItem.ResourceGroupName
-        $subName       = $firstItem.SubscriptionName
-        $targetOwner   = $firstItem.Owner
-        $totalCerts    = $grp.Group.Count
+        $firstItem = $grp.Group[0]
+        $agwName = $firstItem.AppGatewayName
+        $rgName = $firstItem.ResourceGroupName
+        $subName = $firstItem.SubscriptionName
+        $targetOwner = $firstItem.Owner
+        $totalCerts = $grp.Group.Count
 
-        $expiredCount  = ($grp.Group | Where-Object { $_.DaysRemaining -le 0 }).Count
-        $urgentCount   = ($grp.Group | Where-Object { $_.DaysRemaining -le 7  -and $_.DaysRemaining -gt 0 }).Count
-        $soonCount     = ($grp.Group | Where-Object { $_.DaysRemaining -le 30 -and $_.DaysRemaining -gt 7 }).Count
-        $healthyCount  = ($grp.Group | Where-Object { $_.DaysRemaining -gt 30 }).Count
+        $expiredCount = ($grp.Group | Where-Object { $_.DaysRemaining -le 0 }).Count
+        $urgentCount = ($grp.Group | Where-Object { $_.DaysRemaining -le 7 -and $_.DaysRemaining -gt 0 }).Count
+        $soonCount = ($grp.Group | Where-Object { $_.DaysRemaining -le 30 -and $_.DaysRemaining -gt 7 }).Count
+        $healthyCount = ($grp.Group | Where-Object { $_.DaysRemaining -gt 30 }).Count
 
         Write-Log "Generating HTML email for '$agwName' (Total: $totalCerts | Expired: $expiredCount | Urgent: $urgentCount | Healthy: $healthyCount)..." "INFO"
 
         # HTML Generation
-        $mailHtml  = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
+        $mailHtml = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">'
         $mailHtml += '<style>'
         $mailHtml += 'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; color: #24292e; line-height: 1.5; margin: 20px; }'
         $mailHtml += '.header-box { background: linear-gradient(135deg, #1f4068 0%, #162447 100%); color: white; padding: 22px 25px; border-radius: 6px 6px 0 0; }'

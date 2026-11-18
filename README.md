@@ -80,6 +80,41 @@ Outputs every certificate in the tenant regardless of expiry date, exports to CS
 
 ---
 
+## 🚀 Azure Application Gateway Certificate Auditor (`Export-AppGwCertExpiry.ps1`)
+
+Use [`Export-AppGwCertExpiry.ps1`](./Export-AppGwCertExpiry.ps1) to discover, inspect, and export ALL SSL/TLS certificates configured directly in Azure Application Gateways across all accessible subscriptions into a detailed CSV file.
+
+### 🌟 Key Highlights & Capabilities
+- **Accurate Leaf PFX Extraction:** Deconstructs uploaded PKCS#7 / PFX certificate chains and uses Basic Constraints (`OID 2.5.29.19`) plus expiration analysis to isolate the true **Leaf (End-Entity Server) certificate**, eliminating false reports caused by long-lived Root or Intermediate CAs.
+- **Full Expiry & Lifecycle Audit:** Flags `EXPIRED`, `EXPIRING URGENT` (<= 7 days), `EXPIRING SOON` (<= 30 days), `EXPIRING UPCOMING` (<= 90 days), and `ACTIVE` certificates.
+- **Detailed CSV Export:** Generates a timestamped CSV (`AppGateway-CertExpiry-<timestamp>.csv`) containing:
+  - `SubscriptionId`, `SubscriptionName`, `ResourceGroupName`, `AppGatewayName`, `GatewayState`, `GatewayLocation`
+  - `CertificateName`, `CertificateSource` (`Directly Uploaded (PFX)`)
+  - `CommonName`, `Subject`, `Issuer`, `SerialNumber`, `Thumbprint`, `SignatureAlgorithm`, `PublicKeyAlgorithm`
+  - `ValidFrom_Local`, `ValidFrom_UTC`, `ExpirationDateTime_Local`, `ExpirationDateTime_UTC`, `DaysRemaining`, `ExpiryStatus`
+  - `AssociatedListeners` (Listener names & hostnames/SNI), `AssociatedHostNames`, `ListenerCount`, `IsAttachedToListener`
+  - `KeyVaultSecretId`, `GatewayTags`, `ScanTimestamp_UTC`
+- **Scope Flexibility:** Supports scanning all tenant subscriptions, specific Management Groups (`-ManagementGroupId`), specific subscriptions (`-SubscriptionIds`), or targeted Resource Groups and Application Gateways.
+- **Optional Key Vault Integration:** Pass `-IncludeKeyVaultCertificates` to also inspect Key Vault-backed SSL certificates in the same run.
+
+### 💻 Quick Usage Examples
+
+```powershell
+# 1. Full tenant scan - export all Application Gateway certificates to CSV:
+.\Export-AppGwCertExpiry.ps1
+
+# 2. Scope to a specific subscription:
+.\Export-AppGwCertExpiry.ps1 -SubscriptionIds "242eb51a-ca35-493b-b2d7-941aa572c048"
+
+# 3. Target a specific Resource Group and Application Gateway:
+.\Export-AppGwCertExpiry.ps1 -ResourceGroupName "my-rg" -AppGatewayName "appgw-prod-01"
+
+# 4. Custom CSV path and include Key Vault-referenced certificates:
+.\Export-AppGwCertExpiry.ps1 -IncludeKeyVaultCertificates -CsvPath "C:\Reports\AppGateway-Certs.csv"
+```
+
+---
+
 ## ⚡ Stage 2: Deploying to Azure Automation Account (`script_v2.ps1`)
 
 Once local testing confirms all tenant certificates are detected, deploy [`script_v2.ps1`](./script_v2.ps1) to your Azure Automation Account to run daily and email owners automatically.
