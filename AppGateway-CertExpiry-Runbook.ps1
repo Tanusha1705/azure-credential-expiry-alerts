@@ -39,7 +39,16 @@ param (
     [string]$DefaultOwnerEmail = "cloud-alerts@yourdomain.com",
 
     [Parameter(Mandatory = $false)]
-    [string]$SendEmailAlways = "Yes"
+    [string]$SendEmailAlways = "Yes",
+
+    [Parameter(Mandatory = $false)]
+    [string]$CsvPath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$StorageAccountName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$StorageContainerName = "appgateway-reports"
 )
 
 # Suppress autosave output so it doesn't pollute the Output Stream
@@ -97,6 +106,12 @@ if (-not [string]::IsNullOrEmpty($varOwner)) { $DefaultOwnerEmail = $varOwner }
 
 $varSendAlways = Get-AutomationVariable -Name "SendEmailAlways" -ErrorAction SilentlyContinue
 if (-not [string]::IsNullOrEmpty($varSendAlways)) { $SendEmailAlways = $varSendAlways }
+
+$varCsvPath = Get-AutomationVariable -Name "AppGatewayCertCsvPath" -ErrorAction SilentlyContinue
+if (-not [string]::IsNullOrEmpty($varCsvPath) -and [string]::IsNullOrEmpty($CsvPath)) { $CsvPath = $varCsvPath }
+
+$varStorage = Get-AutomationVariable -Name "ReportStorageAccountName" -ErrorAction SilentlyContinue
+if (-not [string]::IsNullOrEmpty($varStorage) -and [string]::IsNullOrEmpty($StorageAccountName)) { $StorageAccountName = $varStorage }
 
 $CCRecipientsVar = Get-AutomationVariable -Name "EmailCC_AppGatewayCertExpiry" -ErrorAction SilentlyContinue
 $CCRecipients = @()
@@ -536,7 +551,7 @@ if ($allCertRecords.Count -eq 0) {
 }
 
 # =====================================================================
-# 6. OUTPUT TEST RESULTS IN EXACT REQUESTED FORMAT
+# 6. OUTPUT TEST RESULTS & EXPORT TO CSV
 # =====================================================================
 Write-Output ""
 Write-Output "============================= APPLICATION GATEWAY CERTIFICATE TEST RESULTS ============================="
@@ -546,6 +561,64 @@ $consoleTable = $allCertRecords | Sort-Object DaysRemaining | Format-Table -Prop
 
 Write-Output $consoleTable
 Write-Output "========================================================================================================"
+
+# Resolve CSV destination path
+if ([string]::IsNullOrWhiteSpace($CsvPath)) {
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $baseDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($env:TEMP) { $env:TEMP } else { (Get-Location).Path }
+    $CsvPath = Join-Path $baseDir "AppGateway-CertExpiry-$timestamp.csv"
+}
+
+$generatedCsvContent = $null
+$csvBlobUrl = $null
+
+try {
+    $csvExportRecords = $allCertRecords | Sort-Object DaysRemaining | Select-Object `
+        SubscriptionId, SubscriptionName, ResourceGroupName, AppGatewayName, CertificateName, `
+        CommonName, Issuer, Thumbprint, ExpirationDateTime, ExpirationDate_UTC, DaysRemaining, `
+        Status, AssociatedListeners, CertificateType, Owner, KeyVaultReference
+
+    $csvExportRecords | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+    $generatedCsvContent = Get-Content -Path $CsvPath -Raw
+
+    Write-Log "==========================================================================" "SUCCESS"
+    Write-Log "  CSV AUDIT REPORT SAVED TO DISK!" "SUCCESS"
+    Write-Log "  File Path     : $CsvPath" "SUCCESS"
+    Write-Log "  Total Records : $($allCertRecords.Count)" "SUCCESS"
+    Write-Log "==========================================================================" "SUCCESS"
+
+    # Optional: Upload to Azure Storage Account & generate 7-day SAS URL for direct browser download
+    if (-not [string]::IsNullOrWhiteSpace($StorageAccountName)) {
+        try {
+            Write-Log "Uploading CSV report to Azure Storage Account '$StorageAccountName'..." "INFO"
+            $saList = Get-AzStorageAccount -ErrorAction SilentlyContinue
+            $targetSa = $saList | Where-Object { $_.StorageAccountName -eq $StorageAccountName } | Select-Object -First 1
+            if ($targetSa) {
+                $ctx = $targetSa.Context
+                New-AzStorageContainer -Name $StorageContainerName -Context $ctx -ErrorAction SilentlyContinue | Out-Null
+                $blobName = [System.IO.Path]::GetFileName($CsvPath)
+                Set-AzStorageBlobContent -File $CsvPath -Container $StorageContainerName -Blob $blobName -Context $ctx -Force | Out-Null
+                $sasToken = New-AzStorageBlobSASToken -Container $StorageContainerName -Blob $blobName -Permission "r" -ExpiryTime (Get-Date).AddDays(7) -Context $ctx
+                $csvBlobUrl = "$($ctx.BlobEndPoint)$StorageContainerName/$blobName$sasToken"
+                Write-Log "DIRECT CSV DOWNLOAD LINK (Valid for 7 days):" "SUCCESS"
+                Write-Log $csvBlobUrl "SUCCESS"
+            }
+        }
+        catch {
+            Write-Log "Azure Storage upload skipped: $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    # Print CSV content directly to Output Stream so it can be copied directly from Azure Automation Test / Job Pane
+    Write-Output ""
+    Write-Output "----------------------------- [BEGIN CSV DATA FOR DOWNLOAD / COPY] -----------------------------"
+    Write-Output $generatedCsvContent
+    Write-Output "------------------------------ [END CSV DATA FOR DOWNLOAD / COPY] ------------------------------"
+    Write-Output ""
+}
+catch {
+    Write-Log "Failed to export CSV: $($_.Exception.Message)" "WARN"
+}
 
 # =====================================================================
 # 7. FILTER FOR EMAIL DISPATCH
@@ -596,7 +669,7 @@ function Get-GraphAccessToken {
 }
 
 function Send-GraphEmail {
-    param ($Token, $To, $Cc, $Bcc, $Subj, $Html, $Sender)
+    param ($Token, $To, $Cc, $Bcc, $Subj, $Html, $Sender, $Attachments)
     try {
         $headers = @{
             "Authorization" = "Bearer $Token"
@@ -611,10 +684,11 @@ function Send-GraphEmail {
         }
         if ($Cc -and $Cc.Count -gt 0) { $emailData.message["ccRecipients"] = @($Cc) }
         if ($Bcc -and $Bcc.Count -gt 0) { $emailData.message["bccRecipients"] = @($Bcc) }
+        if ($Attachments -and $Attachments.Count -gt 0) { $emailData.message["attachments"] = @($Attachments) }
 
         $jsonBody = $emailData | ConvertTo-Json -Depth 100
         Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/users/$Sender/sendMail" -Method Post -Headers $headers -Body $jsonBody -ContentType "application/json" -ErrorAction Stop
-        Write-Log "Email accepted by Microsoft Graph for '$Subj' to $($To.Count) recipient(s)." "SUCCESS"
+        Write-Log "Email accepted by Microsoft Graph for '$Subj' to $($To.Count) recipient(s) with $($Attachments.Count) attachment(s)." "SUCCESS"
     }
     catch {
         Write-Log "Failed to dispatch email via Microsoft Graph: $($_.Exception.Message)" "ERROR"
@@ -787,6 +861,27 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
             $recipients += @{ emailAddress = @{ address = $DefaultOwnerEmail } }
         }
 
+        $emailAttachments = @()
+        if (Test-Path $CsvPath) {
+            try {
+                $csvBytes = [System.IO.File]::ReadAllBytes($CsvPath)
+                $csvB64 = [System.Convert]::ToBase64String($csvBytes)
+                $csvFileName = [System.IO.Path]::GetFileName($CsvPath)
+                $emailAttachments += @{
+                    "@odata.type" = "#microsoft.graph.fileAttachment"
+                    name         = $csvFileName
+                    contentType  = "text/csv"
+                    contentBytes = $csvB64
+                }
+            }
+            catch { }
+        }
+
+        if ($csvBlobUrl) {
+            $downloadBtnHtml = "<div style='margin-bottom:15px; text-align:center;'><a href='$csvBlobUrl' style='display:inline-block; padding:12px 20px; background:#0078d4; color:#ffffff; text-decoration:none; border-radius:5px; font-weight:bold; font-size:14px;'>&#128229; Download Complete CSV Certificate Inventory</a></div>"
+            $mailHtml = $mailHtml -replace '(<div class="action-box">)', "$downloadBtnHtml`$1"
+        }
+
         Send-GraphEmail `
             -Token $graphToken `
             -To $recipients `
@@ -794,7 +889,8 @@ if ($graphToken -and $emailRecords.Count -gt 0) {
             -Bcc $BCCRecipients `
             -Subj $subject `
             -Html $mailHtml `
-            -Sender $GraphSenderEmail
+            -Sender $GraphSenderEmail `
+            -Attachments $emailAttachments
     }
 }
 
