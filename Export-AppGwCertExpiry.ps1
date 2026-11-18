@@ -60,25 +60,25 @@
 
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $false, HelpMessage = "Specific subscription GUID(s) or name(s) to scan")]
+    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Management Group ID(s) or display name(s) to scan")]
+    [Parameter(Mandatory = $false)]
     [string[]]$ManagementGroupId,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Filter to a specific Resource Group")]
+    [Parameter(Mandatory = $false)]
     [string]$ResourceGroupName,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Filter to a specific Application Gateway")]
+    [Parameter(Mandatory = $false)]
     [string]$AppGatewayName,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Include Key Vault-referenced certificates in addition to uploaded PFX certs (Default: $true for full list)")]
+    [Parameter(Mandatory = $false)]
     [bool]$IncludeKeyVaultCertificates = $true,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Threshold in days for expiration alert flagging")]
+    [Parameter(Mandatory = $false)]
     [int]$DaysUntilExpiration = 30,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Output CSV file path")]
+    [Parameter(Mandatory = $false)]
     [string]$CsvPath
 )
 
